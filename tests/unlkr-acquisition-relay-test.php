@@ -6,6 +6,7 @@
 $GLOBALS['unlkr_http_responses'] = array();
 $GLOBALS['unlkr_http_requests'] = array();
 $GLOBALS['unlkr_options'] = array();
+$GLOBALS['unlkr_before_cas'] = null;
 
 function add_action() {}
 function add_filter() {}
@@ -24,9 +25,9 @@ class Unlkr_Test_Request { private $route; public function __construct($route) {
 class Unlkr_Test_Wpdb {
     public $options = 'wp_options';
     public function prepare($sql) { $arguments = func_get_args(); array_shift($arguments); return serialize(array($sql, $arguments)); }
-    public function query($sql) { list($statement, $arguments) = unserialize($sql); list($next, $name, $previous) = $arguments; if (!isset($GLOBALS['unlkr_options'][$name]) || $GLOBALS['unlkr_options'][$name] !== $previous) { return 0; } $GLOBALS['unlkr_options'][$name] = $next; return 1; }
+    public function query($sql) { list($statement, $arguments) = unserialize($sql); list($next, $name, $previous) = $arguments; if ($GLOBALS['unlkr_before_cas'] !== null) { $callback = $GLOBALS['unlkr_before_cas']; $GLOBALS['unlkr_before_cas'] = null; $callback($next, $name, $previous); } if (!isset($GLOBALS['unlkr_options'][$name]) || $GLOBALS['unlkr_options'][$name] !== $previous) { return 0; } $GLOBALS['unlkr_options'][$name] = $next; return 1; }
     public function esc_like($value) { return $value; }
-    public function get_col($sql) { return array_values(array_filter(array_keys($GLOBALS['unlkr_options']), function ($name) { return strpos($name, 'unlkr_acq_attempt_') === 0 && $name !== 'unlkr_acq_attempt_purge_after' && $name !== 'unlkr_acq_attempt_purge_lock'; })); }
+    public function get_col($sql) { return array_values(array_filter(array_keys($GLOBALS['unlkr_options']), function ($name) { $record = isset($GLOBALS['unlkr_options'][$name]) ? json_decode($GLOBALS['unlkr_options'][$name], true) : null; return strpos($name, 'unlkr_acq_attempt_') === 0 && $name !== 'unlkr_acq_attempt_purge_after' && $name !== 'unlkr_acq_attempt_purge_lock' && is_array($record) && isset($record['expires_at']) && $record['expires_at'] <= time(); })); }
 }
 $wpdb = new Unlkr_Test_Wpdb();
 
@@ -117,20 +118,33 @@ check(body_at(8)['submission_id'] !== $unprocessable_id, '422 atomically rotates
 $attempt_f = 'ffffffff-ffff-4fff-8fff-ffffffffffff';
 $attempt_g = '12121212-1212-4121-8121-121212121212';
 $attempt_h = '13131313-1313-4131-8131-131313131313';
+$attempt_i = '14141414-1414-4141-8141-141414141414';
 $expired_id = '99999999-9999-4999-8999-999999999999';
+$winner_id = '88888888-8888-4888-8888-888888888888';
 $expired_name = 'unlkr_acq_attempt_' . substr(hash('sha256', $attempt_f), 0, 40);
 $GLOBALS['unlkr_options'][$expired_name] = json_encode(array('id' => $expired_id, 'created_at' => 1, 'expires_at' => 2));
 $GLOBALS['unlkr_options']['unlkr_acq_attempt_purge_after'] = time() + 3600;
+$GLOBALS['unlkr_before_cas'] = function ($next, $name, $previous) use ($expired_name, $winner_id) { if ($name === $expired_name) { $GLOBALS['unlkr_options'][$name] = json_encode(array('id' => $winner_id, 'created_at' => time(), 'expires_at' => time() + 2592000)); } };
 $GLOBALS['unlkr_http_responses'] = array(response(201));
 $relay->after_store(42, form_data($attempt_f), array(), official_attributes());
-check(body_at(9)['submission_id'] !== $expired_id, 'expired map starts a new idempotency attempt instead of replaying');
-check(json_decode($GLOBALS['unlkr_options'][$expired_name], true)['expires_at'] > time(), 'new attempt persists created and expiry timestamps');
+check(body_at(9)['submission_id'] === $winner_id, 'expiration race rereads winner and never erases fresh mapping');
+check(json_decode($GLOBALS['unlkr_options'][$expired_name], true)['expires_at'] > time(), 'winning attempt persists created and expiry timestamps');
 $purge_name = 'unlkr_acq_attempt_' . substr(hash('sha256', $attempt_g), 0, 40);
 $GLOBALS['unlkr_options'][$purge_name] = json_encode(array('id' => $expired_id, 'created_at' => 1, 'expires_at' => 2));
 $GLOBALS['unlkr_options']['unlkr_acq_attempt_purge_after'] = 0;
 $GLOBALS['unlkr_http_responses'] = array(response(201));
 $relay->after_store(42, form_data($attempt_h), array(), official_attributes());
 check(!isset($GLOBALS['unlkr_options'][$purge_name]), 'bounded purge removes expired opaque mapping idempotently');
+
+for ($index = 0; $index < 101; $index++) {
+    $GLOBALS['unlkr_options']['unlkr_acq_attempt_backlog_' . $index] = json_encode(array('id' => $expired_id, 'created_at' => 1, 'expires_at' => 2));
+}
+$GLOBALS['unlkr_options']['unlkr_acq_attempt_purge_after'] = 0;
+$GLOBALS['unlkr_options']['unlkr_acq_attempt_purge_lock'] = (string) (time() - 301) . ':orphaned';
+$GLOBALS['unlkr_http_responses'] = array(response(201));
+$relay->after_store(42, form_data($attempt_i), array(), official_attributes());
+check($GLOBALS['unlkr_options']['unlkr_acq_attempt_purge_lock'] === '0', 'stale purge lease is recovered and safely released');
+check((int) $GLOBALS['unlkr_options']['unlkr_acq_attempt_purge_after'] <= time() + 60, 'backlog drains in bounded one-minute batches rather than growing forever');
 
 $GLOBALS['unlkr_http_responses'] = array('WP_Error', response(201));
 $result = $relay->deliver($config, array('submission_id' => 'a'), '00000000-0000-4000-8000-000000000099');
@@ -156,4 +170,4 @@ check(count($GLOBALS['unlkr_http_requests']) === $before_disabled && !isset($GLO
 $source = file_get_contents(dirname(__DIR__) . '/web/app/mu-plugins/unlkr-acquisition-relay.php');
 check(strpos($source, 'error_log') === false && strpos($source, 'wp_safe_remote_post') !== false && strpos($source, 'wp_remote_post') === false && strpos($source, 'wp_schedule_event') === false, 'relay has no secret logs, uses safe HTTP and registers no cron');
 
-echo "OK - 30 assertions\n";
+echo "OK - 33 assertions\n";

@@ -18,6 +18,8 @@ if (!class_exists('Unlkr_Acquisition_Relay')) {
         const PURGE_LOCK_OPTION = 'unlkr_acq_attempt_purge_lock';
         const PURGE_BATCH = 100;
         const PURGE_INTERVAL = 86400;
+        const PURGE_BACKLOG_INTERVAL = 60;
+        const PURGE_LOCK_TTL = 300;
 
         /** @var array<string, mixed>|null */
         private $last_delivery = null;
@@ -320,19 +322,25 @@ if (!class_exists('Unlkr_Acquisition_Relay')) {
             }
 
             $option_name = $this->attempt_option_name($attempt_token);
-            $raw_stored = get_option($option_name, false);
-            $stored = $this->attempt_record($raw_stored);
-            if ($stored !== null && $stored['expires_at'] > time()) {
-                return $stored['id'];
-            }
-            if ($raw_stored !== false && function_exists('delete_option')) {
-                delete_option($option_name);
-            }
+            // A raw expired value is never deleted optimistically: that could
+            // erase a fresh map inserted by a competing request. Replace it by
+            // compare-and-swap, then always reread the winner.
+            for ($attempt = 0; $attempt < 3; $attempt++) {
+                $raw_stored = get_option($option_name, false);
+                $stored = $this->attempt_record($raw_stored);
+                if ($stored !== null && $stored['expires_at'] > time()) {
+                    return $stored['id'];
+                }
 
-            $submission_id = function_exists('wp_generate_uuid4') ? wp_generate_uuid4() : $this->uuid4();
-            $record = $this->encode_attempt_record($submission_id, $retention_seconds);
-            if (add_option($option_name, $record, '', 'no')) {
-                return $submission_id;
+                $submission_id = function_exists('wp_generate_uuid4') ? wp_generate_uuid4() : $this->uuid4();
+                $record = $this->encode_attempt_record($submission_id, $retention_seconds);
+                if ($raw_stored === false) {
+                    if (add_option($option_name, $record, '', 'no')) {
+                        return $submission_id;
+                    }
+                } elseif ($this->compare_and_swap_option($option_name, $raw_stored, $record)) {
+                    return $submission_id;
+                }
             }
 
             $stored = $this->attempt_record(get_option($option_name, false));
@@ -359,14 +367,25 @@ if (!class_exists('Unlkr_Acquisition_Relay')) {
             }
             $next_id = function_exists('wp_generate_uuid4') ? wp_generate_uuid4() : $this->uuid4();
             $next_record = $this->encode_attempt_record($next_id, $retention_seconds);
+            return $this->compare_and_swap_option($option_name, $current, $next_record);
+        }
+
+        private function compare_and_swap_option($option_name, $expected_value, $next_value)
+        {
+            global $wpdb;
+            if (!isset($wpdb) || !isset($wpdb->options) || !method_exists($wpdb, 'prepare') || !method_exists($wpdb, 'query')) {
+                return false;
+            }
             $sql = $wpdb->prepare(
                 "UPDATE {$wpdb->options} SET option_value = %s WHERE option_name = %s AND option_value = %s",
-                $next_record,
+                $next_value,
                 $option_name,
-                $current
+                $expected_value
             );
             $updated = $wpdb->query($sql);
-            if ($updated && function_exists('wp_cache_delete')) {
+            // The failed-CAS path is precisely where another PHP worker may have
+            // written the winner. Invalidate before its reread as well.
+            if (function_exists('wp_cache_delete')) {
                 wp_cache_delete($option_name, 'options');
             }
 
@@ -408,45 +427,55 @@ if (!class_exists('Unlkr_Acquisition_Relay')) {
          */
         private function maybe_purge_attempts($config)
         {
-            if (!$config['enabled'] || !$config['valid'] || !function_exists('get_option') || !function_exists('add_option')) {
+            global $wpdb;
+            if (!$config['enabled'] || !$config['valid'] || !function_exists('get_option') || !function_exists('add_option')
+                || !isset($wpdb) || !isset($wpdb->options) || !method_exists($wpdb, 'prepare') || !method_exists($wpdb, 'get_col')) {
                 return;
             }
             $now = time();
             if ((int) get_option(self::PURGE_AFTER_OPTION, 0) > $now) {
                 return;
             }
-            if (!add_option(self::PURGE_LOCK_OPTION, (string) $now, '', 'no')) {
+            $lock_token = $now . ':' . (function_exists('wp_generate_uuid4') ? wp_generate_uuid4() : $this->uuid4());
+            $current_lock = get_option(self::PURGE_LOCK_OPTION, false);
+            if ($current_lock === false) {
+                $acquired = add_option(self::PURGE_LOCK_OPTION, $lock_token, '', 'no');
+            } else {
+                $lock_created_at = (int) strtok((string) $current_lock, ':');
+                $acquired = ($current_lock === '0' || $lock_created_at <= 0 || $lock_created_at + self::PURGE_LOCK_TTL < $now)
+                    && $this->compare_and_swap_option(self::PURGE_LOCK_OPTION, $current_lock, $lock_token);
+            }
+            if (!$acquired) {
                 return;
             }
-
-            global $wpdb;
             try {
-                if (isset($wpdb) && isset($wpdb->options) && method_exists($wpdb, 'prepare') && method_exists($wpdb, 'get_col')) {
-                    $like = method_exists($wpdb, 'esc_like') ? $wpdb->esc_like(self::ATTEMPT_PREFIX) . '%' : self::ATTEMPT_PREFIX . '%';
-                    $sql = $wpdb->prepare(
-                        "SELECT option_name FROM {$wpdb->options} WHERE option_name LIKE %s AND option_name NOT IN (%s, %s) ORDER BY option_id ASC LIMIT %d",
-                        $like,
-                        self::PURGE_AFTER_OPTION,
-                        self::PURGE_LOCK_OPTION,
-                        self::PURGE_BATCH
-                    );
-                    $option_names = (array) $wpdb->get_col($sql);
-                    foreach ($option_names as $option_name) {
-                        $record = $this->attempt_record(get_option($option_name, false));
-                        if ($record === null || $record['expires_at'] <= $now) {
-                            if (function_exists('delete_option')) {
-                                delete_option($option_name);
-                            }
+                $has_backlog = false;
+                $like = method_exists($wpdb, 'esc_like') ? $wpdb->esc_like(self::ATTEMPT_PREFIX) . '%' : self::ATTEMPT_PREFIX . '%';
+                $sql = $wpdb->prepare(
+                    "SELECT option_name FROM {$wpdb->options} WHERE option_name LIKE %s AND option_name NOT IN (%s, %s) AND CAST(JSON_UNQUOTE(JSON_EXTRACT(IF(JSON_VALID(option_value), option_value, '{}'), '$.expires_at')) AS UNSIGNED) <= %d ORDER BY option_id ASC LIMIT %d",
+                    $like,
+                    self::PURGE_AFTER_OPTION,
+                    self::PURGE_LOCK_OPTION,
+                    $now,
+                    self::PURGE_BATCH + 1
+                );
+                $option_names = (array) $wpdb->get_col($sql);
+                $has_backlog = count($option_names) > self::PURGE_BATCH;
+                foreach (array_slice($option_names, 0, self::PURGE_BATCH) as $option_name) {
+                    $record = $this->attempt_record(get_option($option_name, false));
+                    if ($record === null || $record['expires_at'] <= $now) {
+                        if (function_exists('delete_option')) {
+                            delete_option($option_name);
                         }
                     }
                 }
                 if (function_exists('update_option')) {
-                    update_option(self::PURGE_AFTER_OPTION, $now + self::PURGE_INTERVAL, false);
+                    update_option(self::PURGE_AFTER_OPTION, $now + ($has_backlog ? self::PURGE_BACKLOG_INTERVAL : self::PURGE_INTERVAL), false);
                 }
             } finally {
-                if (function_exists('delete_option')) {
-                    delete_option(self::PURGE_LOCK_OPTION);
-                }
+                // Do not delete a lock that a later worker recovered. A neutral
+                // sentinel keeps the single technical option reusable forever.
+                $this->compare_and_swap_option(self::PURGE_LOCK_OPTION, $lock_token, '0');
             }
         }
 
