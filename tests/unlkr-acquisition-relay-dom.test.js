@@ -1,29 +1,28 @@
 const fs = require('fs');
 const vm = require('vm');
 
-const source = fs.readFileSync('web/app/mu-plugins/unlkr-acquisition-relay.php', 'utf8');
-const scriptMatch = source.match(/<script>([\s\S]*?)<\/script>/);
-if (!scriptMatch) throw new Error('relay bootstrap script missing');
-const bootstrap = scriptMatch[1]
-  .replace('<?php echo $form_id; ?>', '42')
-  .replace('<?php echo $field_name; ?>', '"unlkr_attempt"');
+const bootstrap = fs.readFileSync('web/app/mu-plugins/unlkr-acquisition-relay.js', 'utf8');
 
 function check(condition, label) {
   if (!condition) throw new Error(`FAIL: ${label}`);
 }
 
 function run({ crypto = true } = {}) {
-  const input = { name: 'unlkr_attempt', value: '' };
+  let sequence = 0;
+  const form = { listeners: {}, addEventListener(type, callback) { this.listeners[type] = callback; } };
+  const input = { name: 'unlkr_attempt', value: '', form };
   const wrapper = {
+    ready: false,
     getAttribute: (name) => name === 'data-form-id' ? '42' : null,
     querySelectorAll: () => wrapper.ready ? [input] : [],
-    ready: false,
+    closest: () => form,
   };
+  const meta = { getAttribute: (name) => name === 'data-form-id' ? '42' : 'unlkr_attempt' };
   let observer;
-  const state = { stopped: false };
+  const state = { timerCleared: false };
   const document = {
-    readyState: 'complete',
-    documentElement: {},
+    readyState: 'complete', documentElement: {},
+    querySelector: () => meta,
     querySelectorAll: () => [wrapper],
     addEventListener: () => {},
   };
@@ -33,24 +32,27 @@ function run({ crypto = true } = {}) {
   }
   const window = {
     MutationObserver,
-    setTimeout: () => 7,
-    clearTimeout: () => { state.stopped = true; },
-    crypto: crypto ? { randomUUID: () => '11111111-1111-4111-8111-111111111111', getRandomValues: () => {} } : undefined,
+    setTimeout: (callback, delay) => { if (delay === 0) callback(); return 7; },
+    clearTimeout: () => { state.timerCleared = true; },
+    crypto: crypto ? { randomUUID: () => `11111111-1111-4111-8111-${String(++sequence).padStart(12, '0')}`, getRandomValues: () => {} } : undefined,
   };
   vm.runInNewContext(bootstrap, { window, document, Uint8Array });
-  return { input, wrapper, observer, state };
+  return { input, wrapper, form, observer, state };
 }
 
 const asynchronous = run();
 check(asynchronous.observer && !asynchronous.observer.disconnected, 'empty MetForm wrapper starts bounded observer');
 asynchronous.wrapper.ready = true;
 asynchronous.observer.callback();
-check(asynchronous.input.value === '11111111-1111-4111-8111-111111111111', 'observer fills asynchronously rendered hidden attempt input');
-check(asynchronous.observer.disconnected && asynchronous.state.stopped, 'observer and timeout are cleaned once input exists');
+const firstAttempt = asynchronous.input.value;
+check(/^11111111-1111-4111-8111-/.test(firstAttempt), 'observer fills asynchronously rendered hidden attempt input');
+check(asynchronous.observer.disconnected && asynchronous.state.timerCleared, 'observer and timeout are cleaned once input exists');
+asynchronous.input.value = '';
+asynchronous.form.listeners.reset();
+check(asynchronous.input.value !== '' && asynchronous.input.value !== firstAttempt, 'targeted form reset rotates attempt token for second submission');
 
 const noCrypto = run({ crypto: false });
 noCrypto.wrapper.ready = true;
-noCrypto.observer.callback();
 check(noCrypto.input.value === '', 'absence of Web Crypto remains fail-closed');
 
-console.log('OK - 4 DOM assertions');
+console.log('OK - 5 DOM assertions');

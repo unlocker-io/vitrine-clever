@@ -14,11 +14,9 @@ if (!class_exists('Unlkr_Acquisition_Relay')) {
     {
         const NEUTRAL_ERROR = 'Votre demande a bien été reçue, mais nous ne pouvons pas la transmettre pour le moment. Veuillez réessayer.';
         const ATTEMPT_PREFIX = 'unlkr_acq_attempt_';
-        const PURGE_AFTER_OPTION = 'unlkr_acq_attempt_purge_after';
         const PURGE_LOCK_OPTION = 'unlkr_acq_attempt_purge_lock';
-        const PURGE_BATCH = 100;
-        const PURGE_INTERVAL = 86400;
-        const PURGE_BACKLOG_INTERVAL = 60;
+        const PURGE_HOOK = 'unlkr_acquisition_relay_purge';
+        const PURGE_BATCH = 500;
         const PURGE_LOCK_TTL = 300;
 
         /** @var array<string, mixed>|null */
@@ -35,7 +33,10 @@ if (!class_exists('Unlkr_Acquisition_Relay')) {
             }
 
             if (function_exists('add_action')) {
-                add_action('wp_footer', array($this, 'render_attempt_field_bootstrap'), 100);
+                add_action('wp_enqueue_scripts', array($this, 'enqueue_attempt_field_bootstrap'));
+                add_action('wp_head', array($this, 'render_attempt_bootstrap_configuration'), 100);
+                add_action('init', array($this, 'manage_purge_schedule'));
+                add_action(self::PURGE_HOOK, array($this, 'run_scheduled_purge'));
             }
         }
 
@@ -61,8 +62,6 @@ if (!class_exists('Unlkr_Acquisition_Relay')) {
                 $this->last_delivery = array('ok' => false, 'status' => 503, 'reason' => 'configuration');
                 return;
             }
-
-            $this->maybe_purge_attempts($config);
 
             $payload = $this->payload($form_data, $config);
             if ($payload === null) {
@@ -180,25 +179,26 @@ if (!class_exists('Unlkr_Acquisition_Relay')) {
             );
         }
 
-        /**
-         * Adds a random opaque attempt token only to the configured form. The
-         * operator must first add the matching hidden MetForm input. No cookie,
-         * PII, credential, or advertising identifier is written to the page.
-         */
-        public function render_attempt_field_bootstrap()
+        /** External same-origin asset; no inline script is required by CSP. */
+        public function enqueue_attempt_field_bootstrap()
+        {
+            $config = $this->configuration();
+            if (!$config['enabled'] || !$config['valid'] || !function_exists('wp_enqueue_script') || !function_exists('plugin_dir_url')) {
+                return;
+            }
+
+            wp_enqueue_script('unlkr-acquisition-relay', plugin_dir_url(__FILE__) . 'unlkr-acquisition-relay.js', array(), '1.0.0', true);
+        }
+
+        /** Emits only public form metadata used by the external bootstrap asset. */
+        public function render_attempt_bootstrap_configuration()
         {
             $config = $this->configuration();
             if (!$config['enabled'] || !$config['valid']) {
                 return;
             }
-
-            $form_id = (int) $config['form_id'];
-            $field_name = function_exists('wp_json_encode')
-                ? wp_json_encode($config['fields']['attempt_token'], JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT)
-                : json_encode($config['fields']['attempt_token']);
-            ?>
-<script>(function(){'use strict';var formId=<?php echo $form_id; ?>,fieldName=<?php echo $field_name; ?>,valid=/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i,observer=null,timer=null,stop=function(){if(observer){observer.disconnect();observer=null;}if(timer){window.clearTimeout(timer);timer=null;}},uuid=function(){if(!window.crypto||typeof window.crypto.getRandomValues!=='function'){return null;}if(typeof window.crypto.randomUUID==='function'){return window.crypto.randomUUID();}var a=new Uint8Array(16);window.crypto.getRandomValues(a);a[6]=(a[6]&15)|64;a[8]=(a[8]&63)|128;var h=[];for(var i=0;i<a.length;i++){h.push(('0'+a[i].toString(16)).slice(-2));}return h.slice(0,4).join('')+'-'+h.slice(4,6).join('')+'-'+h.slice(6,8).join('')+'-'+h.slice(8,10).join('')+'-'+h.slice(10,16).join('');},attach=function(){if(!window.crypto||typeof window.crypto.getRandomValues!=='function'){return false;}var found=false,wrappers=document.querySelectorAll('[data-form-id]');for(var i=0;i<wrappers.length;i++){if(String(wrappers[i].getAttribute('data-form-id'))!==String(formId)){continue;}var inputs=wrappers[i].querySelectorAll('input[type="hidden"]');for(var j=0;j<inputs.length;j++){if(inputs[j].name===fieldName){found=true;if(!valid.test(inputs[j].value)){inputs[j].value=uuid();}}}}return found;},start=function(){if(attach()){return;}if(!window.MutationObserver||!document.documentElement){return;}observer=new window.MutationObserver(function(){if(attach()){stop();}});observer.observe(document.documentElement,{childList:true,subtree:true});timer=window.setTimeout(stop,10000);};if(document.readyState==='loading'){document.addEventListener('DOMContentLoaded',start,{once:true});}else{start();}}());</script>
-            <?php
+            $escape = function_exists('esc_attr') ? 'esc_attr' : 'htmlspecialchars';
+            echo '<meta name="unlkr-acquisition-relay" data-form-id="' . $escape((string) $config['form_id']) . '" data-attempt-field="' . $escape($config['fields']['attempt_token']) . '">';
         }
 
         /**
@@ -310,14 +310,14 @@ if (!class_exists('Unlkr_Acquisition_Relay')) {
 
         /**
          * Resolves an opaque browser attempt UUID to a distinct CRM idempotency
-         * UUID. add_option is an INSERT with WordPress' unique option_name
-         * constraint, so simultaneous requests share one durable mapping.
+         * UUID. A non-overwriting SQL insert plus WordPress' unique option_name
+         * constraint makes simultaneous requests share one durable mapping.
          *
          * @return string|null
          */
         private function submission_id($attempt_token, $retention_seconds)
         {
-            if (!function_exists('get_option') || !function_exists('add_option')) {
+            if (!function_exists('get_option')) {
                 return null;
             }
 
@@ -335,7 +335,7 @@ if (!class_exists('Unlkr_Acquisition_Relay')) {
                 $submission_id = function_exists('wp_generate_uuid4') ? wp_generate_uuid4() : $this->uuid4();
                 $record = $this->encode_attempt_record($submission_id, $retention_seconds);
                 if ($raw_stored === false) {
-                    if (add_option($option_name, $record, '', 'no')) {
+                    if ($this->insert_option_once($option_name, $record)) {
                         return $submission_id;
                     }
                 } elseif ($this->compare_and_swap_option($option_name, $raw_stored, $record)) {
@@ -392,6 +392,31 @@ if (!class_exists('Unlkr_Acquisition_Relay')) {
             return $updated === 1;
         }
 
+        /**
+         * WordPress 6.9 add_option() deliberately UPSERTs duplicate keys; it is
+         * unsuitable for idempotency/locks. INSERT IGNORE returns 1 only to the
+         * worker that inserted this exact option, on both MySQL and MariaDB.
+         */
+        private function insert_option_once($option_name, $value)
+        {
+            global $wpdb;
+            if (!isset($wpdb) || !isset($wpdb->options) || !method_exists($wpdb, 'prepare') || !method_exists($wpdb, 'query')) {
+                return false;
+            }
+            $sql = $wpdb->prepare(
+                "INSERT IGNORE INTO `{$wpdb->options}` (`option_name`, `option_value`, `autoload`) VALUES (%s, %s, 'off')",
+                $option_name,
+                $value
+            );
+            $inserted = $wpdb->query($sql) === 1;
+            if (function_exists('wp_cache_delete')) {
+                wp_cache_delete($option_name, 'options');
+                wp_cache_delete('notoptions', 'options');
+            }
+
+            return $inserted;
+        }
+
         private function attempt_option_name($attempt_token)
         {
             return self::ATTEMPT_PREFIX . substr(hash('sha256', $attempt_token), 0, 40);
@@ -420,26 +445,42 @@ if (!class_exists('Unlkr_Acquisition_Relay')) {
             return function_exists('wp_json_encode') ? wp_json_encode($record) : json_encode($record);
         }
 
-        /**
-         * Runs only after the relay and explicit consent gate are enabled. It
-         * schedules nothing: at most one bounded, idempotent scan per day is
-         * performed during a real accepted form submission.
-         */
-        private function maybe_purge_attempts($config)
+        /** Keeps the daily maintenance event strictly behind the relay/privacy gate. */
+        public function manage_purge_schedule()
+        {
+            $config = $this->configuration();
+            if (!$config['enabled'] || !$config['valid']) {
+                if (function_exists('wp_unschedule_hook')) {
+                    wp_unschedule_hook(self::PURGE_HOOK);
+                }
+                return;
+            }
+            if (function_exists('wp_next_scheduled') && function_exists('wp_schedule_event') && !wp_next_scheduled(self::PURGE_HOOK)) {
+                wp_schedule_event(time() + 60, 'daily', self::PURGE_HOOK);
+            }
+        }
+
+        /** Called by WP-Cron only; it never sends CRM data. */
+        public function run_scheduled_purge()
+        {
+            $config = $this->configuration();
+            if ($config['enabled'] && $config['valid']) {
+                $this->purge_expired_attempts();
+            }
+        }
+
+        /** A bounded PHP parser avoids database JSON-function dependencies. */
+        private function purge_expired_attempts()
         {
             global $wpdb;
-            if (!$config['enabled'] || !$config['valid'] || !function_exists('get_option') || !function_exists('add_option')
-                || !isset($wpdb) || !isset($wpdb->options) || !method_exists($wpdb, 'prepare') || !method_exists($wpdb, 'get_col')) {
+            if (!isset($wpdb) || !isset($wpdb->options) || !method_exists($wpdb, 'prepare') || !method_exists($wpdb, 'get_results')) {
                 return;
             }
             $now = time();
-            if ((int) get_option(self::PURGE_AFTER_OPTION, 0) > $now) {
-                return;
-            }
             $lock_token = $now . ':' . (function_exists('wp_generate_uuid4') ? wp_generate_uuid4() : $this->uuid4());
             $current_lock = get_option(self::PURGE_LOCK_OPTION, false);
             if ($current_lock === false) {
-                $acquired = add_option(self::PURGE_LOCK_OPTION, $lock_token, '', 'no');
+                $acquired = $this->insert_option_once(self::PURGE_LOCK_OPTION, $lock_token);
             } else {
                 $lock_created_at = (int) strtok((string) $current_lock, ':');
                 $acquired = ($current_lock === '0' || $lock_created_at <= 0 || $lock_created_at + self::PURGE_LOCK_TTL < $now)
@@ -448,35 +489,42 @@ if (!class_exists('Unlkr_Acquisition_Relay')) {
             if (!$acquired) {
                 return;
             }
+
             try {
-                $has_backlog = false;
                 $like = method_exists($wpdb, 'esc_like') ? $wpdb->esc_like(self::ATTEMPT_PREFIX) . '%' : self::ATTEMPT_PREFIX . '%';
                 $sql = $wpdb->prepare(
-                    "SELECT option_name FROM {$wpdb->options} WHERE option_name LIKE %s AND option_name NOT IN (%s, %s) AND CAST(JSON_UNQUOTE(JSON_EXTRACT(IF(JSON_VALID(option_value), option_value, '{}'), '$.expires_at')) AS UNSIGNED) <= %d ORDER BY option_id ASC LIMIT %d",
+                    "SELECT option_name, option_value FROM `{$wpdb->options}` WHERE option_name LIKE %s AND option_name != %s ORDER BY option_id ASC LIMIT %d",
                     $like,
-                    self::PURGE_AFTER_OPTION,
                     self::PURGE_LOCK_OPTION,
-                    $now,
-                    self::PURGE_BATCH + 1
+                    self::PURGE_BATCH
                 );
-                $option_names = (array) $wpdb->get_col($sql);
-                $has_backlog = count($option_names) > self::PURGE_BATCH;
-                foreach (array_slice($option_names, 0, self::PURGE_BATCH) as $option_name) {
-                    $record = $this->attempt_record(get_option($option_name, false));
+                foreach ((array) $wpdb->get_results($sql) as $row) {
+                    if (!isset($row->option_name, $row->option_value)) {
+                        continue;
+                    }
+                    $record = $this->attempt_record($row->option_value);
                     if ($record === null || $record['expires_at'] <= $now) {
-                        if (function_exists('delete_option')) {
-                            delete_option($option_name);
-                        }
+                        $this->delete_option_if_value($row->option_name, $row->option_value);
                     }
                 }
-                if (function_exists('update_option')) {
-                    update_option(self::PURGE_AFTER_OPTION, $now + ($has_backlog ? self::PURGE_BACKLOG_INTERVAL : self::PURGE_INTERVAL), false);
-                }
             } finally {
-                // Do not delete a lock that a later worker recovered. A neutral
-                // sentinel keeps the single technical option reusable forever.
                 $this->compare_and_swap_option(self::PURGE_LOCK_OPTION, $lock_token, '0');
             }
+        }
+
+        private function delete_option_if_value($option_name, $expected_value)
+        {
+            global $wpdb;
+            if (!isset($wpdb) || !isset($wpdb->options) || !method_exists($wpdb, 'prepare') || !method_exists($wpdb, 'query')) {
+                return false;
+            }
+            $sql = $wpdb->prepare("DELETE FROM `{$wpdb->options}` WHERE option_name = %s AND option_value = %s", $option_name, $expected_value);
+            $deleted = $wpdb->query($sql) === 1;
+            if (function_exists('wp_cache_delete')) {
+                wp_cache_delete($option_name, 'options');
+            }
+
+            return $deleted;
         }
 
         private function is_uuid($value)
