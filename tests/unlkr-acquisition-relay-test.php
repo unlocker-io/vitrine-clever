@@ -12,6 +12,8 @@ function add_filter() {}
 function wp_generate_uuid4() { static $n = 0; $n++; return sprintf('00000000-0000-4000-8000-%012d', $n); }
 function add_option($name, $value) { if (array_key_exists($name, $GLOBALS['unlkr_options'])) { return false; } $GLOBALS['unlkr_options'][$name] = $value; return true; }
 function get_option($name, $default = false) { return array_key_exists($name, $GLOBALS['unlkr_options']) ? $GLOBALS['unlkr_options'][$name] : $default; }
+function update_option($name, $value) { $GLOBALS['unlkr_options'][$name] = $value; return true; }
+function delete_option($name) { unset($GLOBALS['unlkr_options'][$name]); return true; }
 function wp_cache_delete() {}
 function wp_json_encode($value) { return json_encode($value); }
 function wp_safe_remote_post($url, $args) { $GLOBALS['unlkr_http_requests'][] = array($url, $args); return array_shift($GLOBALS['unlkr_http_responses']); }
@@ -21,8 +23,10 @@ class WP_REST_Response { public $data; public $status; public function __constru
 class Unlkr_Test_Request { private $route; public function __construct($route) { $this->route = $route; } public function get_route() { return $this->route; } }
 class Unlkr_Test_Wpdb {
     public $options = 'wp_options';
-    public function prepare($sql, $next, $name, $previous) { return serialize(array($next, $name, $previous)); }
-    public function query($sql) { list($next, $name, $previous) = unserialize($sql); if (!isset($GLOBALS['unlkr_options'][$name]) || $GLOBALS['unlkr_options'][$name] !== $previous) { return 0; } $GLOBALS['unlkr_options'][$name] = $next; return 1; }
+    public function prepare($sql) { $arguments = func_get_args(); array_shift($arguments); return serialize(array($sql, $arguments)); }
+    public function query($sql) { list($statement, $arguments) = unserialize($sql); list($next, $name, $previous) = $arguments; if (!isset($GLOBALS['unlkr_options'][$name]) || $GLOBALS['unlkr_options'][$name] !== $previous) { return 0; } $GLOBALS['unlkr_options'][$name] = $next; return 1; }
+    public function esc_like($value) { return $value; }
+    public function get_col($sql) { return array_values(array_filter(array_keys($GLOBALS['unlkr_options']), function ($name) { return strpos($name, 'unlkr_acq_attempt_') === 0 && $name !== 'unlkr_acq_attempt_purge_after' && $name !== 'unlkr_acq_attempt_purge_lock'; })); }
 }
 $wpdb = new Unlkr_Test_Wpdb();
 
@@ -32,7 +36,7 @@ function check($condition, $message) { if (!$condition) { fwrite(STDERR, "FAIL: 
 function response($code) { return array('response' => array('code' => $code)); }
 function body_at($request_index) { return json_decode($GLOBALS['unlkr_http_requests'][$request_index][1]['body'], true); }
 function env_reset() {
-    foreach (array('CRM_ACQUISITION_RELAY_ENABLED', 'CRM_ACQUISITION_API_URL', 'CRM_ACQUISITION_ALLOWED_HOSTS', 'CRM_ACQUISITION_SERVICE_TOKEN', 'CRM_ACQUISITION_METFORM_FORM_ID', 'CRM_ACQUISITION_LANDING_KEY', 'CRM_ACQUISITION_PRIVACY_NOTICE_VERSION', 'CRM_ACQUISITION_CONSENT_GATE_CONFIRMED', 'CRM_ACQUISITION_FIELD_EMAIL', 'CRM_ACQUISITION_FIELD_NAME', 'CRM_ACQUISITION_FIELD_PHONE', 'CRM_ACQUISITION_FIELD_BUSINESS_NAME', 'CRM_ACQUISITION_FIELD_COUNTRY', 'CRM_ACQUISITION_FIELD_AREA', 'CRM_ACQUISITION_FIELD_PROPERTY_COUNT_BAND', 'CRM_ACQUISITION_FIELD_OFFER', 'CRM_ACQUISITION_FIELD_ADS_MEASUREMENT', 'CRM_ACQUISITION_FIELD_ADS_SHARING', 'CRM_ACQUISITION_FIELD_MARKETING_OPT_IN', 'CRM_ACQUISITION_FIELD_ATTEMPT_TOKEN') as $key) { putenv($key); }
+    foreach (array('CRM_ACQUISITION_RELAY_ENABLED', 'CRM_ACQUISITION_API_URL', 'CRM_ACQUISITION_ALLOWED_HOSTS', 'CRM_ACQUISITION_SERVICE_TOKEN', 'CRM_ACQUISITION_METFORM_FORM_ID', 'CRM_ACQUISITION_LANDING_KEY', 'CRM_ACQUISITION_PRIVACY_NOTICE_VERSION', 'CRM_ACQUISITION_CONSENT_GATE_CONFIRMED', 'CRM_ACQUISITION_ATTEMPT_RETENTION_DAYS', 'CRM_ACQUISITION_FIELD_EMAIL', 'CRM_ACQUISITION_FIELD_NAME', 'CRM_ACQUISITION_FIELD_PHONE', 'CRM_ACQUISITION_FIELD_BUSINESS_NAME', 'CRM_ACQUISITION_FIELD_COUNTRY', 'CRM_ACQUISITION_FIELD_AREA', 'CRM_ACQUISITION_FIELD_PROPERTY_COUNT_BAND', 'CRM_ACQUISITION_FIELD_OFFER', 'CRM_ACQUISITION_FIELD_ADS_MEASUREMENT', 'CRM_ACQUISITION_FIELD_ADS_SHARING', 'CRM_ACQUISITION_FIELD_MARKETING_OPT_IN', 'CRM_ACQUISITION_FIELD_ATTEMPT_TOKEN') as $key) { putenv($key); }
 }
 function configure() {
     env_reset();
@@ -63,6 +67,7 @@ configure();
 $relay = new Unlkr_Acquisition_Relay();
 $config = $relay->configuration();
 check($config['valid'], 'complete configuration plus explicit consent gate is accepted');
+check($config['retention_seconds'] === 2592000, 'technical attempt-map retention defaults to 30 days');
 $payload = $relay->payload(form_data($attempt_a), $config);
 check($payload['contact']['phone'] === null && $payload['landing_key'] === 'mountain-concierges', 'mapper emits null empty phone and server landing key');
 $invalid_format = form_data($attempt_a); $invalid_format['country'] = 'France';
@@ -109,6 +114,24 @@ $unprocessable_id = body_at(7)['submission_id'];
 $relay->after_store(42, form_data($attempt_e), array(), official_attributes());
 check(body_at(8)['submission_id'] !== $unprocessable_id, '422 atomically rotates next corrected submission UUID');
 
+$attempt_f = 'ffffffff-ffff-4fff-8fff-ffffffffffff';
+$attempt_g = '12121212-1212-4121-8121-121212121212';
+$attempt_h = '13131313-1313-4131-8131-131313131313';
+$expired_id = '99999999-9999-4999-8999-999999999999';
+$expired_name = 'unlkr_acq_attempt_' . substr(hash('sha256', $attempt_f), 0, 40);
+$GLOBALS['unlkr_options'][$expired_name] = json_encode(array('id' => $expired_id, 'created_at' => 1, 'expires_at' => 2));
+$GLOBALS['unlkr_options']['unlkr_acq_attempt_purge_after'] = time() + 3600;
+$GLOBALS['unlkr_http_responses'] = array(response(201));
+$relay->after_store(42, form_data($attempt_f), array(), official_attributes());
+check(body_at(9)['submission_id'] !== $expired_id, 'expired map starts a new idempotency attempt instead of replaying');
+check(json_decode($GLOBALS['unlkr_options'][$expired_name], true)['expires_at'] > time(), 'new attempt persists created and expiry timestamps');
+$purge_name = 'unlkr_acq_attempt_' . substr(hash('sha256', $attempt_g), 0, 40);
+$GLOBALS['unlkr_options'][$purge_name] = json_encode(array('id' => $expired_id, 'created_at' => 1, 'expires_at' => 2));
+$GLOBALS['unlkr_options']['unlkr_acq_attempt_purge_after'] = 0;
+$GLOBALS['unlkr_http_responses'] = array(response(201));
+$relay->after_store(42, form_data($attempt_h), array(), official_attributes());
+check(!isset($GLOBALS['unlkr_options'][$purge_name]), 'bounded purge removes expired opaque mapping idempotently');
+
 $GLOBALS['unlkr_http_responses'] = array('WP_Error', response(201));
 $result = $relay->deliver($config, array('submission_id' => 'a'), '00000000-0000-4000-8000-000000000099');
 check($result['ok'] && $result['attempts'] === 2, 'network timeout gets exactly one retry');
@@ -126,10 +149,11 @@ $result = $relay->deliver($config, array('oversize' => str_repeat('a', 32769)), 
 check(!$result['ok'] && $result['attempts'] === 0 && count($GLOBALS['unlkr_http_requests']) === $before_oversize, 'oversized JSON stays local');
 
 putenv('CRM_ACQUISITION_RELAY_ENABLED=0');
+$GLOBALS['unlkr_options'] = array();
 $before_disabled = count($GLOBALS['unlkr_http_requests']);
 $relay->after_store(42, form_data($attempt_a), array(), official_attributes());
-check(count($GLOBALS['unlkr_http_requests']) === $before_disabled, 'disabled relay never sends');
+check(count($GLOBALS['unlkr_http_requests']) === $before_disabled && !isset($GLOBALS['unlkr_options']['unlkr_acq_attempt_purge_after']), 'disabled relay neither sends nor schedules purge work');
 $source = file_get_contents(dirname(__DIR__) . '/web/app/mu-plugins/unlkr-acquisition-relay.php');
-check(strpos($source, 'error_log') === false && strpos($source, 'wp_safe_remote_post') !== false && strpos($source, 'wp_remote_post') === false, 'relay has no secret logs and uses WordPress safe HTTP primitive');
+check(strpos($source, 'error_log') === false && strpos($source, 'wp_safe_remote_post') !== false && strpos($source, 'wp_remote_post') === false && strpos($source, 'wp_schedule_event') === false, 'relay has no secret logs, uses safe HTTP and registers no cron');
 
-echo "OK - 24 assertions\n";
+echo "OK - 30 assertions\n";

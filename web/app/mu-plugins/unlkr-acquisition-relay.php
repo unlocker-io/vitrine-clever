@@ -13,6 +13,11 @@ if (!class_exists('Unlkr_Acquisition_Relay')) {
     final class Unlkr_Acquisition_Relay
     {
         const NEUTRAL_ERROR = 'Votre demande a bien été reçue, mais nous ne pouvons pas la transmettre pour le moment. Veuillez réessayer.';
+        const ATTEMPT_PREFIX = 'unlkr_acq_attempt_';
+        const PURGE_AFTER_OPTION = 'unlkr_acq_attempt_purge_after';
+        const PURGE_LOCK_OPTION = 'unlkr_acq_attempt_purge_lock';
+        const PURGE_BATCH = 100;
+        const PURGE_INTERVAL = 86400;
 
         /** @var array<string, mixed>|null */
         private $last_delivery = null;
@@ -55,6 +60,8 @@ if (!class_exists('Unlkr_Acquisition_Relay')) {
                 return;
             }
 
+            $this->maybe_purge_attempts($config);
+
             $payload = $this->payload($form_data, $config);
             if ($payload === null) {
                 $this->last_delivery = array('ok' => false, 'status' => 422, 'reason' => 'invalid_form_data');
@@ -67,7 +74,7 @@ if (!class_exists('Unlkr_Acquisition_Relay')) {
                 return;
             }
 
-            $submission_id = $this->submission_id($attempt_token);
+            $submission_id = $this->submission_id($attempt_token, $config['retention_seconds']);
             if ($submission_id === null) {
                 $this->last_delivery = array('ok' => false, 'status' => 503, 'reason' => 'attempt_storage');
                 return;
@@ -82,7 +89,7 @@ if (!class_exists('Unlkr_Acquisition_Relay')) {
             // possible. The compare-and-swap update is safe if duplicate requests
             // race each other; the opaque browser attempt token itself is unchanged.
             if (in_array((int) $delivery['status'], array(409, 422), true)) {
-                $this->rotate_submission_id($attempt_token, $submission_id);
+                $this->rotate_submission_id($attempt_token, $submission_id, $config['retention_seconds']);
             }
         }
 
@@ -140,6 +147,9 @@ if (!class_exists('Unlkr_Acquisition_Relay')) {
                 && (!isset($parts['port']) || (int) $parts['port'] === 443)
                 && in_array(strtolower((string) $parts['host']), array_map('strtolower', $allowed_hosts), true)
                 && !isset($parts['user'], $parts['pass'], $parts['query'], $parts['fragment']);
+            $retention_days = getenv('CRM_ACQUISITION_ATTEMPT_RETENTION_DAYS');
+            $retention_days = $retention_days === false || $retention_days === '' ? 30 : (ctype_digit((string) $retention_days) ? (int) $retention_days : 0);
+            $retention_is_valid = $retention_days >= 1 && $retention_days <= 90;
 
             $valid = $url_is_allowed
                 && trim((string) getenv('CRM_ACQUISITION_SERVICE_TOKEN')) !== ''
@@ -149,7 +159,8 @@ if (!class_exists('Unlkr_Acquisition_Relay')) {
                 && trim((string) getenv('CRM_ACQUISITION_PRIVACY_NOTICE_VERSION')) !== ''
                 // Deliberate deployment gate: this plugin does not infer CookieYes
                 // state. An operator confirms the tested consent-field mapping.
-                && getenv('CRM_ACQUISITION_CONSENT_GATE_CONFIRMED') === '1';
+                && getenv('CRM_ACQUISITION_CONSENT_GATE_CONFIRMED') === '1'
+                && $retention_is_valid;
             foreach ($fields as $field) {
                 $valid = $valid && $field !== '';
             }
@@ -162,6 +173,7 @@ if (!class_exists('Unlkr_Acquisition_Relay')) {
                 'form_id' => (int) getenv('CRM_ACQUISITION_METFORM_FORM_ID'),
                 'landing_key' => trim((string) getenv('CRM_ACQUISITION_LANDING_KEY')),
                 'notice_version' => trim((string) getenv('CRM_ACQUISITION_PRIVACY_NOTICE_VERSION')),
+                'retention_seconds' => $retention_days * 86400,
                 'fields' => $fields,
             );
         }
@@ -183,7 +195,7 @@ if (!class_exists('Unlkr_Acquisition_Relay')) {
                 ? wp_json_encode($config['fields']['attempt_token'], JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT)
                 : json_encode($config['fields']['attempt_token']);
             ?>
-<script>(function(){'use strict';var formId=<?php echo $form_id; ?>,fieldName=<?php echo $field_name; ?>,uuid=function(){if(window.crypto&&window.crypto.randomUUID){return window.crypto.randomUUID();}var a=new Uint8Array(16);window.crypto.getRandomValues(a);a[6]=(a[6]&15)|64;a[8]=(a[8]&63)|128;var h=[];for(var i=0;i<a.length;i++){h.push(('0'+a[i].toString(16)).slice(-2));}return h.slice(0,4).join('')+'-'+h.slice(4,6).join('')+'-'+h.slice(6,8).join('')+'-'+h.slice(8,10).join('')+'-'+h.slice(10,16).join('');},valid=/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i,attach=function(){var wrappers=document.querySelectorAll('[data-form-id]');for(var i=0;i<wrappers.length;i++){if(String(wrappers[i].getAttribute('data-form-id'))!==String(formId)){continue;}var inputs=wrappers[i].querySelectorAll('input[type="hidden"]');for(var j=0;j<inputs.length;j++){if(inputs[j].name===fieldName&&!valid.test(inputs[j].value)){inputs[j].value=uuid();}}}};if(document.readyState==='loading'){document.addEventListener('DOMContentLoaded',attach);}else{attach();}}());</script>
+<script>(function(){'use strict';var formId=<?php echo $form_id; ?>,fieldName=<?php echo $field_name; ?>,valid=/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i,observer=null,timer=null,stop=function(){if(observer){observer.disconnect();observer=null;}if(timer){window.clearTimeout(timer);timer=null;}},uuid=function(){if(!window.crypto||typeof window.crypto.getRandomValues!=='function'){return null;}if(typeof window.crypto.randomUUID==='function'){return window.crypto.randomUUID();}var a=new Uint8Array(16);window.crypto.getRandomValues(a);a[6]=(a[6]&15)|64;a[8]=(a[8]&63)|128;var h=[];for(var i=0;i<a.length;i++){h.push(('0'+a[i].toString(16)).slice(-2));}return h.slice(0,4).join('')+'-'+h.slice(4,6).join('')+'-'+h.slice(6,8).join('')+'-'+h.slice(8,10).join('')+'-'+h.slice(10,16).join('');},attach=function(){if(!window.crypto||typeof window.crypto.getRandomValues!=='function'){return false;}var found=false,wrappers=document.querySelectorAll('[data-form-id]');for(var i=0;i<wrappers.length;i++){if(String(wrappers[i].getAttribute('data-form-id'))!==String(formId)){continue;}var inputs=wrappers[i].querySelectorAll('input[type="hidden"]');for(var j=0;j<inputs.length;j++){if(inputs[j].name===fieldName){found=true;if(!valid.test(inputs[j].value)){inputs[j].value=uuid();}}}}return found;},start=function(){if(attach()){return;}if(!window.MutationObserver||!document.documentElement){return;}observer=new window.MutationObserver(function(){if(attach()){stop();}});observer.observe(document.documentElement,{childList:true,subtree:true});timer=window.setTimeout(stop,10000);};if(document.readyState==='loading'){document.addEventListener('DOMContentLoaded',start,{once:true});}else{start();}}());</script>
             <?php
         }
 
@@ -301,25 +313,30 @@ if (!class_exists('Unlkr_Acquisition_Relay')) {
          *
          * @return string|null
          */
-        private function submission_id($attempt_token)
+        private function submission_id($attempt_token, $retention_seconds)
         {
             if (!function_exists('get_option') || !function_exists('add_option')) {
                 return null;
             }
 
             $option_name = $this->attempt_option_name($attempt_token);
-            $stored = get_option($option_name, false);
-            if ($this->is_uuid($stored)) {
-                return $stored;
+            $raw_stored = get_option($option_name, false);
+            $stored = $this->attempt_record($raw_stored);
+            if ($stored !== null && $stored['expires_at'] > time()) {
+                return $stored['id'];
+            }
+            if ($raw_stored !== false && function_exists('delete_option')) {
+                delete_option($option_name);
             }
 
             $submission_id = function_exists('wp_generate_uuid4') ? wp_generate_uuid4() : $this->uuid4();
-            if (add_option($option_name, $submission_id, '', 'no')) {
+            $record = $this->encode_attempt_record($submission_id, $retention_seconds);
+            if (add_option($option_name, $record, '', 'no')) {
                 return $submission_id;
             }
 
-            $stored = get_option($option_name, false);
-            return $this->is_uuid($stored) ? $stored : null;
+            $stored = $this->attempt_record(get_option($option_name, false));
+            return $stored !== null && $stored['expires_at'] > time() ? $stored['id'] : null;
         }
 
         /**
@@ -327,7 +344,7 @@ if (!class_exists('Unlkr_Acquisition_Relay')) {
          * response that requested rotation. A second concurrent response cannot
          * overwrite the first rotation.
          */
-        private function rotate_submission_id($attempt_token, $previous_id)
+        private function rotate_submission_id($attempt_token, $previous_id, $retention_seconds)
         {
             global $wpdb;
             if (!isset($wpdb) || !isset($wpdb->options) || !method_exists($wpdb, 'prepare') || !method_exists($wpdb, 'query')) {
@@ -335,12 +352,18 @@ if (!class_exists('Unlkr_Acquisition_Relay')) {
             }
 
             $option_name = $this->attempt_option_name($attempt_token);
+            $current = get_option($option_name, false);
+            $record = $this->attempt_record($current);
+            if ($record === null || $record['id'] !== $previous_id || $record['expires_at'] <= time()) {
+                return false;
+            }
             $next_id = function_exists('wp_generate_uuid4') ? wp_generate_uuid4() : $this->uuid4();
+            $next_record = $this->encode_attempt_record($next_id, $retention_seconds);
             $sql = $wpdb->prepare(
                 "UPDATE {$wpdb->options} SET option_value = %s WHERE option_name = %s AND option_value = %s",
-                $next_id,
+                $next_record,
                 $option_name,
-                $previous_id
+                $current
             );
             $updated = $wpdb->query($sql);
             if ($updated && function_exists('wp_cache_delete')) {
@@ -352,7 +375,79 @@ if (!class_exists('Unlkr_Acquisition_Relay')) {
 
         private function attempt_option_name($attempt_token)
         {
-            return 'unlkr_acq_attempt_' . substr(hash('sha256', $attempt_token), 0, 40);
+            return self::ATTEMPT_PREFIX . substr(hash('sha256', $attempt_token), 0, 40);
+        }
+
+        /** @return array{id:string,created_at:int,expires_at:int}|null */
+        private function attempt_record($value)
+        {
+            if (!is_string($value)) {
+                return null;
+            }
+            $decoded = json_decode($value, true);
+            if (!is_array($decoded) || !$this->is_uuid(isset($decoded['id']) ? $decoded['id'] : null)
+                || !isset($decoded['created_at'], $decoded['expires_at']) || !is_int($decoded['created_at']) || !is_int($decoded['expires_at'])
+                || $decoded['expires_at'] <= $decoded['created_at']) {
+                return null;
+            }
+
+            return array('id' => $decoded['id'], 'created_at' => $decoded['created_at'], 'expires_at' => $decoded['expires_at']);
+        }
+
+        private function encode_attempt_record($submission_id, $retention_seconds)
+        {
+            $created_at = time();
+            $record = array('id' => $submission_id, 'created_at' => $created_at, 'expires_at' => $created_at + (int) $retention_seconds);
+            return function_exists('wp_json_encode') ? wp_json_encode($record) : json_encode($record);
+        }
+
+        /**
+         * Runs only after the relay and explicit consent gate are enabled. It
+         * schedules nothing: at most one bounded, idempotent scan per day is
+         * performed during a real accepted form submission.
+         */
+        private function maybe_purge_attempts($config)
+        {
+            if (!$config['enabled'] || !$config['valid'] || !function_exists('get_option') || !function_exists('add_option')) {
+                return;
+            }
+            $now = time();
+            if ((int) get_option(self::PURGE_AFTER_OPTION, 0) > $now) {
+                return;
+            }
+            if (!add_option(self::PURGE_LOCK_OPTION, (string) $now, '', 'no')) {
+                return;
+            }
+
+            global $wpdb;
+            try {
+                if (isset($wpdb) && isset($wpdb->options) && method_exists($wpdb, 'prepare') && method_exists($wpdb, 'get_col')) {
+                    $like = method_exists($wpdb, 'esc_like') ? $wpdb->esc_like(self::ATTEMPT_PREFIX) . '%' : self::ATTEMPT_PREFIX . '%';
+                    $sql = $wpdb->prepare(
+                        "SELECT option_name FROM {$wpdb->options} WHERE option_name LIKE %s AND option_name NOT IN (%s, %s) ORDER BY option_id ASC LIMIT %d",
+                        $like,
+                        self::PURGE_AFTER_OPTION,
+                        self::PURGE_LOCK_OPTION,
+                        self::PURGE_BATCH
+                    );
+                    $option_names = (array) $wpdb->get_col($sql);
+                    foreach ($option_names as $option_name) {
+                        $record = $this->attempt_record(get_option($option_name, false));
+                        if ($record === null || $record['expires_at'] <= $now) {
+                            if (function_exists('delete_option')) {
+                                delete_option($option_name);
+                            }
+                        }
+                    }
+                }
+                if (function_exists('update_option')) {
+                    update_option(self::PURGE_AFTER_OPTION, $now + self::PURGE_INTERVAL, false);
+                }
+            } finally {
+                if (function_exists('delete_option')) {
+                    delete_option(self::PURGE_LOCK_OPTION);
+                }
+            }
         }
 
         private function is_uuid($value)
