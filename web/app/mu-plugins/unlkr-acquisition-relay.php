@@ -12,7 +12,6 @@
 if (!class_exists('Unlkr_Acquisition_Relay')) {
     final class Unlkr_Acquisition_Relay
     {
-        const RETRY_TTL = 900;
         const NEUTRAL_ERROR = 'Votre demande a bien été reçue, mais nous ne pouvons pas la transmettre pour le moment. Veuillez réessayer.';
 
         /** @var array<string, mixed>|null */
@@ -26,6 +25,10 @@ if (!class_exists('Unlkr_Acquisition_Relay')) {
 
             if (function_exists('add_filter')) {
                 add_filter('rest_post_dispatch', array($this, 'rest_post_dispatch'), 10, 3);
+            }
+
+            if (function_exists('add_action')) {
+                add_action('wp_footer', array($this, 'render_attempt_field_bootstrap'), 100);
             }
         }
 
@@ -58,18 +61,28 @@ if (!class_exists('Unlkr_Acquisition_Relay')) {
                 return;
             }
 
-            $entry_reference = $this->entry_reference($form_data, $attributes);
-            $submission_id = $this->submission_id((int) $form_id, $entry_reference);
+            $attempt_token = $this->attempt_token($form_data, $config);
+            if ($attempt_token === null) {
+                $this->last_delivery = array('ok' => false, 'status' => 422, 'reason' => 'invalid_attempt_token');
+                return;
+            }
+
+            $submission_id = $this->submission_id($attempt_token);
+            if ($submission_id === null) {
+                $this->last_delivery = array('ok' => false, 'status' => 503, 'reason' => 'attempt_storage');
+                return;
+            }
             $payload['submission_id'] = $submission_id;
 
             $delivery = $this->deliver($config, $payload, $submission_id);
             $this->last_delivery = $delivery;
 
-            // A corrected resubmission must receive a new key after a C1b 409.
-            // The transient contains only a random UUID, keyed by a non-PII entry
-            // reference; it never contains form data or a CRM response.
-            if ((int) $delivery['status'] === 409 && $entry_reference !== null) {
-                $this->forget_submission_id((int) $form_id, $entry_reference);
+            // C1b returns 409 when a stable key was used with a changed payload.
+            // Rotate the server-side mapping after 409/422 so a correction remains
+            // possible. The compare-and-swap update is safe if duplicate requests
+            // race each other; the opaque browser attempt token itself is unchanged.
+            if (in_array((int) $delivery['status'], array(409, 422), true)) {
+                $this->rotate_submission_id($attempt_token, $submission_id);
             }
         }
 
@@ -110,7 +123,7 @@ if (!class_exists('Unlkr_Acquisition_Relay')) {
         /** @return array<string, mixed> */
         public function configuration()
         {
-            $field_names = array('email', 'name', 'phone', 'business_name', 'country', 'area', 'property_count_band', 'offer', 'ads_measurement', 'ads_sharing', 'marketing_opt_in');
+            $field_names = array('email', 'name', 'phone', 'business_name', 'country', 'area', 'property_count_band', 'offer', 'ads_measurement', 'ads_sharing', 'marketing_opt_in', 'attempt_token');
             $fields = array();
             foreach ($field_names as $field_name) {
                 $fields[$field_name] = trim((string) getenv('CRM_ACQUISITION_FIELD_' . strtoupper($field_name)));
@@ -124,6 +137,7 @@ if (!class_exists('Unlkr_Acquisition_Relay')) {
                 && isset($parts['scheme'], $parts['host'], $parts['path'])
                 && strtolower((string) $parts['scheme']) === 'https'
                 && $parts['path'] === '/api/v1/acquisition/requests'
+                && (!isset($parts['port']) || (int) $parts['port'] === 443)
                 && in_array(strtolower((string) $parts['host']), array_map('strtolower', $allowed_hosts), true)
                 && !isset($parts['user'], $parts['pass'], $parts['query'], $parts['fragment']);
 
@@ -132,7 +146,10 @@ if (!class_exists('Unlkr_Acquisition_Relay')) {
                 && ctype_digit((string) getenv('CRM_ACQUISITION_METFORM_FORM_ID'))
                 && (int) getenv('CRM_ACQUISITION_METFORM_FORM_ID') > 0
                 && trim((string) getenv('CRM_ACQUISITION_LANDING_KEY')) !== ''
-                && trim((string) getenv('CRM_ACQUISITION_PRIVACY_NOTICE_VERSION')) !== '';
+                && trim((string) getenv('CRM_ACQUISITION_PRIVACY_NOTICE_VERSION')) !== ''
+                // Deliberate deployment gate: this plugin does not infer CookieYes
+                // state. An operator confirms the tested consent-field mapping.
+                && getenv('CRM_ACQUISITION_CONSENT_GATE_CONFIRMED') === '1';
             foreach ($fields as $field) {
                 $valid = $valid && $field !== '';
             }
@@ -147,6 +164,27 @@ if (!class_exists('Unlkr_Acquisition_Relay')) {
                 'notice_version' => trim((string) getenv('CRM_ACQUISITION_PRIVACY_NOTICE_VERSION')),
                 'fields' => $fields,
             );
+        }
+
+        /**
+         * Adds a random opaque attempt token only to the configured form. The
+         * operator must first add the matching hidden MetForm input. No cookie,
+         * PII, credential, or advertising identifier is written to the page.
+         */
+        public function render_attempt_field_bootstrap()
+        {
+            $config = $this->configuration();
+            if (!$config['enabled'] || !$config['valid']) {
+                return;
+            }
+
+            $form_id = (int) $config['form_id'];
+            $field_name = function_exists('wp_json_encode')
+                ? wp_json_encode($config['fields']['attempt_token'], JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT)
+                : json_encode($config['fields']['attempt_token']);
+            ?>
+<script>(function(){'use strict';var formId=<?php echo $form_id; ?>,fieldName=<?php echo $field_name; ?>,uuid=function(){if(window.crypto&&window.crypto.randomUUID){return window.crypto.randomUUID();}var a=new Uint8Array(16);window.crypto.getRandomValues(a);a[6]=(a[6]&15)|64;a[8]=(a[8]&63)|128;var h=[];for(var i=0;i<a.length;i++){h.push(('0'+a[i].toString(16)).slice(-2));}return h.slice(0,4).join('')+'-'+h.slice(4,6).join('')+'-'+h.slice(6,8).join('')+'-'+h.slice(8,10).join('')+'-'+h.slice(10,16).join('');},valid=/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i,attach=function(){var wrappers=document.querySelectorAll('[data-form-id]');for(var i=0;i<wrappers.length;i++){if(String(wrappers[i].getAttribute('data-form-id'))!==String(formId)){continue;}var inputs=wrappers[i].querySelectorAll('input[type="hidden"]');for(var j=0;j<inputs.length;j++){if(inputs[j].name===fieldName&&!valid.test(inputs[j].value)){inputs[j].value=uuid();}}}};if(document.readyState==='loading'){document.addEventListener('DOMContentLoaded',attach);}else{attach();}}());</script>
+            <?php
         }
 
         /**
@@ -250,50 +288,76 @@ if (!class_exists('Unlkr_Acquisition_Relay')) {
         }
 
         /** @return string|null */
-        private function entry_reference($form_data, $attributes)
+        private function attempt_token($form_data, $config)
         {
-            foreach (array($attributes, $form_data) as $source) {
-                if (!is_array($source)) {
-                    continue;
-                }
-                foreach (array('entry_id', 'form_entry_id', 'id') as $key) {
-                    if (isset($source[$key]) && (is_string($source[$key]) || is_int($source[$key])) && $source[$key] !== '') {
-                        return (string) $source[$key];
-                    }
-                }
-            }
-
-            return null;
+            $value = $this->string_or_null($this->field_value($form_data, $config['fields']['attempt_token']));
+            return $value !== null && preg_match('/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i', $value) ? $value : null;
         }
 
-        /** @return string */
-        private function submission_id($form_id, $entry_reference)
+        /**
+         * Resolves an opaque browser attempt UUID to a distinct CRM idempotency
+         * UUID. add_option is an INSERT with WordPress' unique option_name
+         * constraint, so simultaneous requests share one durable mapping.
+         *
+         * @return string|null
+         */
+        private function submission_id($attempt_token)
         {
-            if ($entry_reference !== null && function_exists('get_transient')) {
-                $stored = get_transient($this->transient_key($form_id, $entry_reference));
-                if (is_string($stored) && preg_match('/^[0-9a-f-]{36}$/i', $stored)) {
-                    return $stored;
-                }
+            if (!function_exists('get_option') || !function_exists('add_option')) {
+                return null;
+            }
+
+            $option_name = $this->attempt_option_name($attempt_token);
+            $stored = get_option($option_name, false);
+            if ($this->is_uuid($stored)) {
+                return $stored;
             }
 
             $submission_id = function_exists('wp_generate_uuid4') ? wp_generate_uuid4() : $this->uuid4();
-            if ($entry_reference !== null && function_exists('set_transient')) {
-                set_transient($this->transient_key($form_id, $entry_reference), $submission_id, self::RETRY_TTL);
+            if (add_option($option_name, $submission_id, '', 'no')) {
+                return $submission_id;
             }
 
-            return $submission_id;
+            $stored = get_option($option_name, false);
+            return $this->is_uuid($stored) ? $stored : null;
         }
 
-        private function forget_submission_id($form_id, $entry_reference)
+        /**
+         * Atomically replaces the stored CRM UUID only when it still matches the
+         * response that requested rotation. A second concurrent response cannot
+         * overwrite the first rotation.
+         */
+        private function rotate_submission_id($attempt_token, $previous_id)
         {
-            if (function_exists('delete_transient')) {
-                delete_transient($this->transient_key($form_id, $entry_reference));
+            global $wpdb;
+            if (!isset($wpdb) || !isset($wpdb->options) || !method_exists($wpdb, 'prepare') || !method_exists($wpdb, 'query')) {
+                return false;
             }
+
+            $option_name = $this->attempt_option_name($attempt_token);
+            $next_id = function_exists('wp_generate_uuid4') ? wp_generate_uuid4() : $this->uuid4();
+            $sql = $wpdb->prepare(
+                "UPDATE {$wpdb->options} SET option_value = %s WHERE option_name = %s AND option_value = %s",
+                $next_id,
+                $option_name,
+                $previous_id
+            );
+            $updated = $wpdb->query($sql);
+            if ($updated && function_exists('wp_cache_delete')) {
+                wp_cache_delete($option_name, 'options');
+            }
+
+            return $updated === 1;
         }
 
-        private function transient_key($form_id, $entry_reference)
+        private function attempt_option_name($attempt_token)
         {
-            return 'unlkr_acq_' . substr(hash('sha256', $form_id . '|' . $entry_reference), 0, 40);
+            return 'unlkr_acq_attempt_' . substr(hash('sha256', $attempt_token), 0, 40);
+        }
+
+        private function is_uuid($value)
+        {
+            return is_string($value) && preg_match('/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i', $value);
         }
 
         /** @return array<string, mixed> */
@@ -310,9 +374,11 @@ if (!class_exists('Unlkr_Acquisition_Relay')) {
             $attempt = 0;
             do {
                 $attempt++;
-                $response = wp_remote_post($config['url'], array(
+                $response = wp_safe_remote_post($config['url'], array(
                     'timeout' => 3,
                     'redirection' => 0,
+                    'sslverify' => true,
+                    'reject_unsafe_urls' => true,
                     'headers' => array(
                         'Authorization' => 'Bearer ' . $config['token'],
                         'Idempotency-Key' => $submission_id,
