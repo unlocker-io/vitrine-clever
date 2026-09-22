@@ -11,9 +11,13 @@ $GLOBALS['unlkr_before_insert'] = null;
 $GLOBALS['unlkr_cron'] = array();
 $GLOBALS['unlkr_option_ids'] = array();
 $GLOBALS['unlkr_next_option_id'] = 1;
+$GLOBALS['unlkr_actions'] = array();
+$GLOBALS['unlkr_enqueued_scripts'] = array();
 
-function add_action() {}
+function add_action($hook, $callback, $priority = 10, $accepted_args = 1) { $GLOBALS['unlkr_actions'][] = array($hook, $callback, $priority, $accepted_args); }
 function add_filter() {}
+function plugin_dir_url() { return 'https://public.example.test/app/mu-plugins/'; }
+function wp_enqueue_script($handle, $src, $dependencies = array(), $version = false, $in_footer = false) { $GLOBALS['unlkr_enqueued_scripts'][$handle] = array('src' => $src, 'dependencies' => $dependencies, 'version' => $version, 'in_footer' => $in_footer); }
 function wp_generate_uuid4() { static $n = 0; $n++; return sprintf('00000000-0000-4000-8000-%012d', $n); }
 function get_option($name, $default = false) { return array_key_exists($name, $GLOBALS['unlkr_options']) ? $GLOBALS['unlkr_options'][$name] : $default; }
 function wp_cache_delete() {}
@@ -219,6 +223,16 @@ configure_continuity();
 $continuity = $relay->continuity_configuration();
 check($continuity['enabled'] && $continuity['valid'], 'continuity producer accepts a complete explicit configuration');
 check($continuity['ttl_seconds'] === 300 && $continuity['timeout_ms'] === 3000 && $continuity['retries'] === 1, 'continuity TTL, timeout and retries have bounded defaults');
+$continuity_meta_priority = null;
+foreach ($GLOBALS['unlkr_actions'] as $registered_action) {
+    if ($registered_action[0] === 'wp_head' && is_array($registered_action[1]) && $registered_action[1][1] === 'render_continuity_configuration') {
+        $continuity_meta_priority = $registered_action[2];
+    }
+}
+check($continuity_meta_priority === 100, 'WordPress registers continuity metadata in wp_head at priority 100');
+$GLOBALS['unlkr_enqueued_scripts'] = array();
+$relay->enqueue_continuity_producer();
+check(isset($GLOBALS['unlkr_enqueued_scripts']['unlkr-acquisition-continuity']) && $GLOBALS['unlkr_enqueued_scripts']['unlkr-acquisition-continuity']['in_footer'] === true, 'WordPress places continuity script in footer after head metadata');
 ob_start();
 $relay->render_continuity_configuration();
 $continuity_meta = ob_get_clean();
@@ -240,4 +254,4 @@ check($disabled_meta === '', 'continuity feature is silent when explicitly disab
 $source = file_get_contents(dirname(__DIR__) . '/web/app/mu-plugins/unlkr-acquisition-relay.php');
 check(strpos($source, 'error_log') === false && strpos($source, 'wp_safe_remote_post') !== false && strpos($source, 'wp_remote_post') === false && strpos($source, 'INSERT IGNORE') !== false && strpos($source, 'JSON_EXTRACT') === false, 'relay has no secret logs, uses safe HTTP, non-overwriting insert and no JSON SQL');
 
-echo "OK - 35 assertions\n";
+echo "OK - 37 assertions\n";

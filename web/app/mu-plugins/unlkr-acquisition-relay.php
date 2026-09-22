@@ -274,9 +274,10 @@ if (!class_exists('Unlkr_Acquisition_Relay')) {
                 return;
             }
 
-            // CookieYes emits its initial state early; register this listener in
-            // the document head while leaving the existing MetForm asset alone.
-            wp_enqueue_script('unlkr-acquisition-continuity', plugin_dir_url(__FILE__) . 'unlkr-acquisition-continuity.js', array(), '1.0.0', false);
+            // The configuration meta is rendered in wp_head. Loading this asset
+            // in the footer guarantees that it can read that meta; the script
+            // recovers CookieYes' current state through getCkyConsent().
+            wp_enqueue_script('unlkr-acquisition-continuity', plugin_dir_url(__FILE__) . 'unlkr-acquisition-continuity.js', array(), '1.0.1', true);
         }
 
         /** Emits no bearer, identity, URL, cookie value or personal data. */

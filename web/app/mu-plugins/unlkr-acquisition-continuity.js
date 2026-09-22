@@ -58,6 +58,29 @@
         }
     }
 
+    function hasSameOriginOpener() {
+        if (!window.opener || !window.location || !window.location.origin) {
+            return false;
+        }
+        try {
+            if (window.opener.location && window.opener.location.origin === window.location.origin) {
+                return true;
+            }
+        } catch (error) {
+            // A cross-origin opener is the expected app handoff boundary.
+        }
+        var referrer = String(document.referrer || '');
+        return referrer === window.location.origin || referrer.indexOf(window.location.origin + '/') === 0;
+    }
+
+    // sessionStorage is cloned when a same-origin page opens another tab. Only
+    // the original public page may produce/serve continuity; a clone destroys
+    // its inherited copy before registering any consent or message listener.
+    if (hasSameOriginOpener()) {
+        clearContinuity();
+        return;
+    }
+
     function uuid() {
         if (typeof window.crypto.randomUUID === 'function') {
             return window.crypto.randomUUID();

@@ -34,7 +34,7 @@ function crmResponse(overrides = {}) {
   };
 }
 
-function run({ sessionStorage = memoryStorage(), fetchImpl, attrs = {} } = {}) {
+function run({ sessionStorage = memoryStorage(), fetchImpl, attrs = {}, opener = null, referrer = '' } = {}) {
   const documentListeners = {};
   const windowListeners = {};
   const requests = [];
@@ -49,10 +49,13 @@ function run({ sessionStorage = memoryStorage(), fetchImpl, attrs = {} } = {}) {
     'data-retries': '1',
   }, attrs);
   const document = {
+    referrer,
     querySelector: () => ({ getAttribute: name => metaValues[name] || null }),
     addEventListener: (name, callback) => { documentListeners[name] = callback; },
   };
   const window = {
+    location: { origin: 'https://public.example.test' },
+    opener,
     sessionStorage,
     crypto: { randomUUID: () => IDENTIFY_ID, getRandomValues: () => {} },
     fetch: async (url, options) => {
@@ -115,6 +118,15 @@ function sendRequest(instance, origin = 'https://app.example.test') {
   const stored = JSON.parse(granted.sessionStorage.values[continuityKey()]);
   check(stored.payload.identify_attempt_id === IDENTIFY_ID && stored.expires_at <= Date.now() + 300000, 'stored payload has stable UUID and locally bounded TTL');
   check(Object.keys(stored.payload).sort().join(',') === 'consent_receipt,identify_attempt_id,schema_version,site_key,visitor_handle', 'transport payload contains only the five pseudonymous contract fields');
+
+  const clonedStorage = memoryStorage();
+  clonedStorage.values[continuityKey()] = JSON.stringify(stored);
+  const cloned = run({
+    sessionStorage: clonedStorage,
+    opener: { location: { origin: 'https://public.example.test' } },
+    referrer: 'https://public.example.test/pricing',
+  });
+  check(!clonedStorage.values[continuityKey()] && !cloned.windowListeners.message && cloned.requests.length === 0, 'same-origin opener clone destroys inherited session continuity and cannot deliver twice');
   grant(granted);
   await settle();
   check(granted.requests.length === 1, 'duplicate consent event reuses the stable unconsumed payload');
