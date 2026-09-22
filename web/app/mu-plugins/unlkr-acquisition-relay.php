@@ -1,8 +1,8 @@
 <?php
 /**
  * Plugin Name: Unlocker acquisition relay
- * Description: Relays one explicitly configured MetForm to the internal CRM.
- * Version: 1.1.0
+ * Description: Relays one explicitly configured MetForm and produces consented acquisition continuity.
+ * Version: 1.2.0
  *
  * This relay deliberately has no WordPress admin screen.  It is disabled until
  * its complete server-side configuration is present, and never stores form
@@ -37,7 +37,9 @@ if (!class_exists('Unlkr_Acquisition_Relay')) {
 
             if (function_exists('add_action')) {
                 add_action('wp_enqueue_scripts', array($this, 'enqueue_attempt_field_bootstrap'));
+                add_action('wp_enqueue_scripts', array($this, 'enqueue_continuity_producer'));
                 add_action('wp_head', array($this, 'render_attempt_bootstrap_configuration'), 100);
+                add_action('wp_head', array($this, 'render_continuity_configuration'), 100);
                 add_action('init', array($this, 'manage_purge_schedule'));
                 add_action(self::PURGE_HOOK, array($this, 'run_scheduled_purge'));
                 add_action(self::PURGE_CONTINUATION_HOOK, array($this, 'run_scheduled_purge'));
@@ -203,6 +205,109 @@ if (!class_exists('Unlkr_Acquisition_Relay')) {
             }
             $escape = function_exists('esc_attr') ? 'esc_attr' : 'htmlspecialchars';
             echo '<meta name="unlkr-acquisition-relay" data-form-id="' . $escape((string) $config['form_id']) . '" data-attempt-field="' . $escape($config['fields']['attempt_token']) . '" data-attempt-retention-seconds="' . $escape((string) $config['retention_seconds']) . '">';
+        }
+
+        /**
+         * Public, secret-free C2d configuration. Invalid or incomplete values
+         * keep the producer disabled and prevent its asset from being loaded.
+         *
+         * @return array<string, mixed>
+         */
+        public function continuity_configuration()
+        {
+            $enabled = filter_var(getenv('CRM_ACQUISITION_CONTINUITY_ENABLED'), FILTER_VALIDATE_BOOLEAN);
+            $url = trim((string) getenv('CRM_ACQUISITION_WEB_PREFERENCES_URL'));
+            $allowed_hosts = array_filter(array_map('trim', explode(',', (string) getenv('CRM_ACQUISITION_WEB_ALLOWED_HOSTS'))));
+            $parts = parse_url($url);
+            $url_is_allowed = is_array($parts)
+                && isset($parts['scheme'], $parts['host'], $parts['path'])
+                && strtolower((string) $parts['scheme']) === 'https'
+                && $parts['path'] === '/acquisition-web/preferences'
+                && (!isset($parts['port']) || (int) $parts['port'] === 443)
+                && in_array(strtolower((string) $parts['host']), array_map('strtolower', $allowed_hosts), true)
+                && !isset($parts['user']) && !isset($parts['pass'])
+                && !isset($parts['query']) && !isset($parts['fragment']);
+
+            $origins = array_values(array_unique(array_filter(array_map('trim', explode(',', (string) getenv('CRM_ACQUISITION_CONTINUITY_APP_ORIGINS'))))));
+            $origins_are_valid = count($origins) > 0;
+            foreach ($origins as $origin) {
+                $origin_parts = parse_url($origin);
+                $canonical = is_array($origin_parts)
+                    && isset($origin_parts['scheme'], $origin_parts['host'])
+                    && strtolower((string) $origin_parts['scheme']) === 'https'
+                    && !isset($origin_parts['path']) && !isset($origin_parts['query']) && !isset($origin_parts['fragment'])
+                    && !isset($origin_parts['user']) && !isset($origin_parts['pass'])
+                    && (!isset($origin_parts['port']) || (int) $origin_parts['port'] > 0);
+                $origins_are_valid = $origins_are_valid && $canonical;
+            }
+
+            $ttl = $this->bounded_integer_environment('CRM_ACQUISITION_CONTINUITY_TTL_SECONDS', 300, 60, 1800);
+            $timeout = $this->bounded_integer_environment('CRM_ACQUISITION_CONTINUITY_TIMEOUT_MS', 3000, 500, 10000);
+            $retries = $this->bounded_integer_environment('CRM_ACQUISITION_CONTINUITY_RETRIES', 1, 0, 2);
+            $site_key = trim((string) getenv('CRM_ACQUISITION_SITE_KEY'));
+            $notice_version = trim((string) getenv('CRM_ACQUISITION_CONTINUITY_NOTICE_VERSION'));
+
+            return array(
+                'enabled' => $enabled,
+                'valid' => $url_is_allowed
+                    && $origins_are_valid
+                    && $ttl !== null
+                    && $timeout !== null
+                    && $retries !== null
+                    && $site_key !== '' && strlen($site_key) <= 64
+                    && $notice_version !== '' && strlen($notice_version) <= 64,
+                'url' => $url,
+                'site_key' => $site_key,
+                'notice_version' => $notice_version,
+                'app_origins' => $origins,
+                'ttl_seconds' => $ttl,
+                'timeout_ms' => $timeout,
+                'retries' => $retries,
+            );
+        }
+
+        /** External same-origin asset; it is independent of the MetForm relay. */
+        public function enqueue_continuity_producer()
+        {
+            $config = $this->continuity_configuration();
+            if (!$config['enabled'] || !$config['valid'] || !function_exists('wp_enqueue_script') || !function_exists('plugin_dir_url')) {
+                return;
+            }
+
+            // CookieYes emits its initial state early; register this listener in
+            // the document head while leaving the existing MetForm asset alone.
+            wp_enqueue_script('unlkr-acquisition-continuity', plugin_dir_url(__FILE__) . 'unlkr-acquisition-continuity.js', array(), '1.0.0', false);
+        }
+
+        /** Emits no bearer, identity, URL, cookie value or personal data. */
+        public function render_continuity_configuration()
+        {
+            $config = $this->continuity_configuration();
+            if (!$config['enabled'] || !$config['valid']) {
+                return;
+            }
+            $escape = function_exists('esc_attr') ? 'esc_attr' : 'htmlspecialchars';
+            echo '<meta name="unlkr-acquisition-continuity" data-preferences-url="' . $escape($config['url'])
+                . '" data-site-key="' . $escape($config['site_key'])
+                . '" data-notice-version="' . $escape($config['notice_version'])
+                . '" data-app-origins="' . $escape(implode(',', $config['app_origins']))
+                . '" data-ttl-seconds="' . $escape((string) $config['ttl_seconds'])
+                . '" data-timeout-ms="' . $escape((string) $config['timeout_ms'])
+                . '" data-retries="' . $escape((string) $config['retries']) . '">';
+        }
+
+        /** @return int|null */
+        private function bounded_integer_environment($name, $default, $minimum, $maximum)
+        {
+            $raw = getenv($name);
+            if ($raw === false || $raw === '') {
+                return (int) $default;
+            }
+            if (!ctype_digit((string) $raw)) {
+                return null;
+            }
+            $value = (int) $raw;
+            return $value >= $minimum && $value <= $maximum ? $value : null;
         }
 
         /**
