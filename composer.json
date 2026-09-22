@@ -99,9 +99,6 @@
       "@relay-tests"
     ],
     "phpcs": "phpcs",
-    "relay-tests": [
-      "php tests/unlkr-acquisition-relay-test.php",
-      "node tests/unlkr-acquisition-relay-dom.test.js"
-    ]
+    "relay-tests": "php tests/unlkr-acquisition-relay-test.php"
   }
 }

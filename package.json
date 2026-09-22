@@ -1,0 +1,10 @@
+{
+  "name": "unlocker-vitrine-quality-gates",
+  "private": true,
+  "engines": {
+    "node": ">=20 <25"
+  },
+  "scripts": {
+    "test:relay-dom": "node tests/unlkr-acquisition-relay-dom.test.js"
+  }
+}
