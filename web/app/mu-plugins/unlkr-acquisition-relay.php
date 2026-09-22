@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Unlocker acquisition relay
  * Description: Relays one explicitly configured MetForm to the internal CRM.
- * Version: 1.0.0
+ * Version: 1.1.0
  *
  * This relay deliberately has no WordPress admin screen.  It is disabled until
  * its complete server-side configuration is present, and never stores form
@@ -15,9 +15,12 @@ if (!class_exists('Unlkr_Acquisition_Relay')) {
         const NEUTRAL_ERROR = 'Votre demande a bien été reçue, mais nous ne pouvons pas la transmettre pour le moment. Veuillez réessayer.';
         const ATTEMPT_PREFIX = 'unlkr_acq_attempt_';
         const PURGE_LOCK_OPTION = 'unlkr_acq_attempt_purge_lock';
+        const PURGE_CURSOR_OPTION = 'unlkr_acq_attempt_purge_cursor';
         const PURGE_HOOK = 'unlkr_acquisition_relay_purge';
+        const PURGE_CONTINUATION_HOOK = 'unlkr_acquisition_relay_purge_continuation';
         const PURGE_BATCH = 500;
         const PURGE_LOCK_TTL = 300;
+        const PURGE_CONTINUATION_DELAY = 60;
 
         /** @var array<string, mixed>|null */
         private $last_delivery = null;
@@ -37,6 +40,7 @@ if (!class_exists('Unlkr_Acquisition_Relay')) {
                 add_action('wp_head', array($this, 'render_attempt_bootstrap_configuration'), 100);
                 add_action('init', array($this, 'manage_purge_schedule'));
                 add_action(self::PURGE_HOOK, array($this, 'run_scheduled_purge'));
+                add_action(self::PURGE_CONTINUATION_HOOK, array($this, 'run_scheduled_purge'));
             }
         }
 
@@ -187,7 +191,7 @@ if (!class_exists('Unlkr_Acquisition_Relay')) {
                 return;
             }
 
-            wp_enqueue_script('unlkr-acquisition-relay', plugin_dir_url(__FILE__) . 'unlkr-acquisition-relay.js', array(), '1.0.0', true);
+            wp_enqueue_script('unlkr-acquisition-relay', plugin_dir_url(__FILE__) . 'unlkr-acquisition-relay.js', array(), '1.1.0', true);
         }
 
         /** Emits only public form metadata used by the external bootstrap asset. */
@@ -198,7 +202,7 @@ if (!class_exists('Unlkr_Acquisition_Relay')) {
                 return;
             }
             $escape = function_exists('esc_attr') ? 'esc_attr' : 'htmlspecialchars';
-            echo '<meta name="unlkr-acquisition-relay" data-form-id="' . $escape((string) $config['form_id']) . '" data-attempt-field="' . $escape($config['fields']['attempt_token']) . '">';
+            echo '<meta name="unlkr-acquisition-relay" data-form-id="' . $escape((string) $config['form_id']) . '" data-attempt-field="' . $escape($config['fields']['attempt_token']) . '" data-attempt-retention-seconds="' . $escape((string) $config['retention_seconds']) . '">';
         }
 
         /**
@@ -452,6 +456,7 @@ if (!class_exists('Unlkr_Acquisition_Relay')) {
             if (!$config['enabled'] || !$config['valid']) {
                 if (function_exists('wp_unschedule_hook')) {
                     wp_unschedule_hook(self::PURGE_HOOK);
+                    wp_unschedule_hook(self::PURGE_CONTINUATION_HOOK);
                 }
                 return;
             }
@@ -491,24 +496,64 @@ if (!class_exists('Unlkr_Acquisition_Relay')) {
             }
 
             try {
+                $cursor_raw = get_option(self::PURGE_CURSOR_OPTION, false);
+                if ($cursor_raw === false) {
+                    $this->insert_option_once(self::PURGE_CURSOR_OPTION, '0');
+                    $cursor_raw = get_option(self::PURGE_CURSOR_OPTION, false);
+                }
+                if (!is_scalar($cursor_raw)) {
+                    return;
+                }
+                $cursor_raw = (string) $cursor_raw;
+                if (!preg_match('/^\d+$/', $cursor_raw)) {
+                    if (!$this->compare_and_swap_option(self::PURGE_CURSOR_OPTION, $cursor_raw, '0')) {
+                        return;
+                    }
+                    $cursor_raw = '0';
+                }
+                $cursor = (int) $cursor_raw;
                 $like = method_exists($wpdb, 'esc_like') ? $wpdb->esc_like(self::ATTEMPT_PREFIX) . '%' : self::ATTEMPT_PREFIX . '%';
                 $sql = $wpdb->prepare(
-                    "SELECT option_name, option_value FROM `{$wpdb->options}` WHERE option_name LIKE %s AND option_name != %s ORDER BY option_id ASC LIMIT %d",
+                    "SELECT option_id, option_name, option_value FROM `{$wpdb->options}` WHERE option_name LIKE %s AND option_name NOT IN (%s, %s) AND option_id > %d ORDER BY option_id ASC LIMIT %d",
                     $like,
                     self::PURGE_LOCK_OPTION,
+                    self::PURGE_CURSOR_OPTION,
+                    $cursor,
                     self::PURGE_BATCH
                 );
-                foreach ((array) $wpdb->get_results($sql) as $row) {
-                    if (!isset($row->option_name, $row->option_value)) {
+                $rows = (array) $wpdb->get_results($sql);
+                $last_option_id = $cursor;
+                foreach ($rows as $row) {
+                    if (!isset($row->option_id, $row->option_name, $row->option_value) || !is_numeric($row->option_id)) {
                         continue;
                     }
+                    $last_option_id = max($last_option_id, (int) $row->option_id);
                     $record = $this->attempt_record($row->option_value);
                     if ($record === null || $record['expires_at'] <= $now) {
                         $this->delete_option_if_value($row->option_name, $row->option_value);
                     }
                 }
+
+                if (count($rows) === self::PURGE_BATCH && $last_option_id > $cursor) {
+                    if ($this->compare_and_swap_option(self::PURGE_CURSOR_OPTION, $cursor_raw, (string) $last_option_id)) {
+                        $this->schedule_purge_continuation();
+                    }
+                } else {
+                    // A partial pass has reached the current tail. Restarting at
+                    // zero on the next daily pass makes old retained mappings
+                    // eligible without starving newer expired or invalid rows.
+                    $this->compare_and_swap_option(self::PURGE_CURSOR_OPTION, $cursor_raw, '0');
+                }
             } finally {
                 $this->compare_and_swap_option(self::PURGE_LOCK_OPTION, $lock_token, '0');
+            }
+        }
+
+        /** Continue a full bounded pass without turning the daily task into an unbounded run. */
+        private function schedule_purge_continuation()
+        {
+            if (function_exists('wp_next_scheduled') && function_exists('wp_schedule_single_event') && !wp_next_scheduled(self::PURGE_CONTINUATION_HOOK)) {
+                wp_schedule_single_event(time() + self::PURGE_CONTINUATION_DELAY, self::PURGE_CONTINUATION_HOOK);
             }
         }
 

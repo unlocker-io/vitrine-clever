@@ -9,6 +9,8 @@ $GLOBALS['unlkr_options'] = array();
 $GLOBALS['unlkr_before_cas'] = null;
 $GLOBALS['unlkr_before_insert'] = null;
 $GLOBALS['unlkr_cron'] = array();
+$GLOBALS['unlkr_option_ids'] = array();
+$GLOBALS['unlkr_next_option_id'] = 1;
 
 function add_action() {}
 function add_filter() {}
@@ -17,19 +19,22 @@ function get_option($name, $default = false) { return array_key_exists($name, $G
 function wp_cache_delete() {}
 function wp_next_scheduled($hook) { return isset($GLOBALS['unlkr_cron'][$hook]) ? $GLOBALS['unlkr_cron'][$hook]['timestamp'] : false; }
 function wp_schedule_event($timestamp, $recurrence, $hook) { $GLOBALS['unlkr_cron'][$hook] = array('timestamp' => $timestamp, 'recurrence' => $recurrence); return true; }
+function wp_schedule_single_event($timestamp, $hook) { $GLOBALS['unlkr_cron'][$hook] = array('timestamp' => $timestamp, 'recurrence' => false); return true; }
 function wp_unschedule_hook($hook) { unset($GLOBALS['unlkr_cron'][$hook]); return 1; }
 function wp_json_encode($value) { return json_encode($value); }
 function wp_safe_remote_post($url, $args) { $GLOBALS['unlkr_http_requests'][] = array($url, $args); return array_shift($GLOBALS['unlkr_http_responses']); }
 function is_wp_error($value) { return $value === 'WP_Error'; }
 function wp_remote_retrieve_response_code($value) { return is_array($value) && isset($value['response']['code']) ? $value['response']['code'] : 0; }
+function unlkr_option_id($name) { if (!isset($GLOBALS['unlkr_option_ids'][$name])) { $GLOBALS['unlkr_option_ids'][$name] = $GLOBALS['unlkr_next_option_id']++; } return $GLOBALS['unlkr_option_ids'][$name]; }
+function unlkr_set_option($name, $value) { $GLOBALS['unlkr_options'][$name] = $value; unlkr_option_id($name); }
 class WP_REST_Response { public $data; public $status; public function __construct($data, $status) { $this->data = $data; $this->status = $status; } }
 class Unlkr_Test_Request { private $route; public function __construct($route) { $this->route = $route; } public function get_route() { return $this->route; } }
 class Unlkr_Test_Wpdb {
     public $options = 'wp_options';
     public function prepare($sql) { $arguments = func_get_args(); array_shift($arguments); return serialize(array($sql, $arguments)); }
-    public function query($sql) { list($statement, $arguments) = unserialize($sql); if (strpos($statement, 'INSERT IGNORE') !== false) { list($name, $value) = $arguments; if ($GLOBALS['unlkr_before_insert'] !== null) { $callback = $GLOBALS['unlkr_before_insert']; $GLOBALS['unlkr_before_insert'] = null; $callback($name, $value); } if (isset($GLOBALS['unlkr_options'][$name])) { return 0; } $GLOBALS['unlkr_options'][$name] = $value; return 1; } if (strpos($statement, 'DELETE FROM') !== false) { list($name, $previous) = $arguments; if (!isset($GLOBALS['unlkr_options'][$name]) || $GLOBALS['unlkr_options'][$name] !== $previous) { return 0; } unset($GLOBALS['unlkr_options'][$name]); return 1; } list($next, $name, $previous) = $arguments; if ($GLOBALS['unlkr_before_cas'] !== null) { $callback = $GLOBALS['unlkr_before_cas']; $GLOBALS['unlkr_before_cas'] = null; $callback($next, $name, $previous); } if (!isset($GLOBALS['unlkr_options'][$name]) || $GLOBALS['unlkr_options'][$name] !== $previous) { return 0; } $GLOBALS['unlkr_options'][$name] = $next; return 1; }
+    public function query($sql) { list($statement, $arguments) = unserialize($sql); if (strpos($statement, 'INSERT IGNORE') !== false) { list($name, $value) = $arguments; if ($GLOBALS['unlkr_before_insert'] !== null) { $callback = $GLOBALS['unlkr_before_insert']; $GLOBALS['unlkr_before_insert'] = null; $callback($name, $value); } if (isset($GLOBALS['unlkr_options'][$name])) { return 0; } unlkr_set_option($name, $value); return 1; } if (strpos($statement, 'DELETE FROM') !== false) { list($name, $previous) = $arguments; if (!isset($GLOBALS['unlkr_options'][$name]) || $GLOBALS['unlkr_options'][$name] !== $previous) { return 0; } unset($GLOBALS['unlkr_options'][$name], $GLOBALS['unlkr_option_ids'][$name]); return 1; } list($next, $name, $previous) = $arguments; if ($GLOBALS['unlkr_before_cas'] !== null) { $callback = $GLOBALS['unlkr_before_cas']; $GLOBALS['unlkr_before_cas'] = null; $callback($next, $name, $previous); } if (!isset($GLOBALS['unlkr_options'][$name]) || $GLOBALS['unlkr_options'][$name] !== $previous) { return 0; } $GLOBALS['unlkr_options'][$name] = $next; return 1; }
     public function esc_like($value) { return $value; }
-    public function get_results($sql) { $rows = array(); foreach ($GLOBALS['unlkr_options'] as $name => $value) { if (strpos($name, 'unlkr_acq_attempt_') === 0 && $name !== 'unlkr_acq_attempt_purge_lock') { $rows[] = (object) array('option_name' => $name, 'option_value' => $value); } } return $rows; }
+    public function get_results($sql) { list($statement, $arguments) = unserialize($sql); $cursor = isset($arguments[3]) ? (int) $arguments[3] : 0; $batch = isset($arguments[4]) ? (int) $arguments[4] : 500; $rows = array(); foreach ($GLOBALS['unlkr_options'] as $name => $value) { $option_id = unlkr_option_id($name); if (strpos($name, 'unlkr_acq_attempt_') === 0 && $name !== 'unlkr_acq_attempt_purge_lock' && $name !== 'unlkr_acq_attempt_purge_cursor' && $option_id > $cursor) { $rows[] = (object) array('option_id' => $option_id, 'option_name' => $name, 'option_value' => $value); } } usort($rows, function ($left, $right) { return $left->option_id <=> $right->option_id; }); return array_slice($rows, 0, $batch); }
 }
 $wpdb = new Unlkr_Test_Wpdb();
 
@@ -98,7 +103,7 @@ $relay->after_store(42, form_data($attempt_a), array(), official_attributes());
 check(body_at(2)['submission_id'] === $first_id, 'same attempt receives stable 200 replay UUID');
 
 // Two independent relay instances simulate PHP workers handling a double click.
-// add_option supplies the durable unique insert; C1b receives one idempotency key.
+// INSERT IGNORE supplies the durable unique insert; C1b receives one idempotency key.
 $GLOBALS['unlkr_http_responses'] = array(response(201), response(200));
 (new Unlkr_Acquisition_Relay())->after_store(42, form_data($attempt_c), array(), official_attributes());
 (new Unlkr_Acquisition_Relay())->after_store(42, form_data($attempt_c), array(), official_attributes());
@@ -151,6 +156,27 @@ $relay->run_scheduled_purge();
 check(!isset($GLOBALS['unlkr_options'][$purge_name]) && !isset($GLOBALS['unlkr_options'][$invalid_name]), 'cron purge parses bounded rows in PHP and removes expired plus invalid records');
 check($GLOBALS['unlkr_options']['unlkr_acq_attempt_purge_lock'] === '0', 'stale cron purge lease is recovered and safely released');
 
+// A full first page of live mappings must not starve newer expired/invalid rows.
+$GLOBALS['unlkr_options'] = array();
+$GLOBALS['unlkr_option_ids'] = array();
+$GLOBALS['unlkr_next_option_id'] = 1;
+$GLOBALS['unlkr_cron'] = array();
+$live_record = json_encode(array('id' => $winner_id, 'created_at' => time(), 'expires_at' => time() + 2592000));
+for ($i = 0; $i < 501; $i++) {
+    unlkr_set_option('unlkr_acq_attempt_live_' . $i, $live_record);
+}
+$tail_expired = 'unlkr_acq_attempt_tail_expired';
+$tail_invalid = 'unlkr_acq_attempt_tail_invalid';
+unlkr_set_option($tail_expired, json_encode(array('id' => $expired_id, 'created_at' => 1, 'expires_at' => 2)));
+unlkr_set_option($tail_invalid, 'not-json');
+$relay->run_scheduled_purge();
+check(isset($GLOBALS['unlkr_options'][$tail_expired]) && isset($GLOBALS['unlkr_options'][$tail_invalid]), 'first bounded page advances past more than 500 live mappings without falsely deleting its tail');
+check($GLOBALS['unlkr_options']['unlkr_acq_attempt_purge_cursor'] !== '0' && isset($GLOBALS['unlkr_cron']['unlkr_acquisition_relay_purge_continuation']), 'full page persists progress and schedules one bounded continuation');
+unset($GLOBALS['unlkr_cron']['unlkr_acquisition_relay_purge_continuation']); // Simulate WP-Cron consuming that single event.
+$relay->run_scheduled_purge();
+check(!isset($GLOBALS['unlkr_options'][$tail_expired]) && !isset($GLOBALS['unlkr_options'][$tail_invalid]), 'cursor continuation reaches newer expired and invalid mappings after a full backlog page');
+check($GLOBALS['unlkr_options']['unlkr_acq_attempt_purge_cursor'] === '0', 'partial continuation drains the backlog and resets the next daily scan');
+
 $GLOBALS['unlkr_http_responses'] = array('WP_Error', response(201));
 $result = $relay->deliver($config, array('submission_id' => 'a'), '00000000-0000-4000-8000-000000000099');
 check($result['ok'] && $result['attempts'] === 2, 'network timeout gets exactly one retry');
@@ -169,11 +195,15 @@ check(!$result['ok'] && $result['attempts'] === 0 && count($GLOBALS['unlkr_http_
 
 putenv('CRM_ACQUISITION_RELAY_ENABLED=0');
 $GLOBALS['unlkr_options'] = array();
+$GLOBALS['unlkr_cron'] = array(
+    'unlkr_acquisition_relay_purge' => array('timestamp' => time(), 'recurrence' => 'daily'),
+    'unlkr_acquisition_relay_purge_continuation' => array('timestamp' => time(), 'recurrence' => false),
+);
 $before_disabled = count($GLOBALS['unlkr_http_requests']);
 $relay->after_store(42, form_data($attempt_a), array(), official_attributes());
 $relay->manage_purge_schedule();
-check(count($GLOBALS['unlkr_http_requests']) === $before_disabled && !isset($GLOBALS['unlkr_cron']['unlkr_acquisition_relay_purge']), 'disabled relay neither sends nor schedules purge work');
+check(count($GLOBALS['unlkr_http_requests']) === $before_disabled && !isset($GLOBALS['unlkr_cron']['unlkr_acquisition_relay_purge']) && !isset($GLOBALS['unlkr_cron']['unlkr_acquisition_relay_purge_continuation']), 'disabled relay neither sends nor schedules daily or continuation purge work');
 $source = file_get_contents(dirname(__DIR__) . '/web/app/mu-plugins/unlkr-acquisition-relay.php');
 check(strpos($source, 'error_log') === false && strpos($source, 'wp_safe_remote_post') !== false && strpos($source, 'wp_remote_post') === false && strpos($source, 'INSERT IGNORE') !== false && strpos($source, 'JSON_EXTRACT') === false, 'relay has no secret logs, uses safe HTTP, non-overwriting insert and no JSON SQL');
 
-echo "OK - 36 assertions\n";
+echo "OK - 28 assertions\n";
