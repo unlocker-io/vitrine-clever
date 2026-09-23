@@ -38,8 +38,10 @@ if (!class_exists('Unlkr_Acquisition_Relay')) {
             if (function_exists('add_action')) {
                 add_action('wp_enqueue_scripts', array($this, 'enqueue_attempt_field_bootstrap'));
                 add_action('wp_enqueue_scripts', array($this, 'enqueue_continuity_producer'));
+                add_action('wp_enqueue_scripts', array($this, 'enqueue_touches_producer'));
                 add_action('wp_head', array($this, 'render_attempt_bootstrap_configuration'), 100);
                 add_action('wp_head', array($this, 'render_continuity_configuration'), 100);
+                add_action('wp_head', array($this, 'render_touches_configuration'), 100);
                 add_action('init', array($this, 'manage_purge_schedule'));
                 add_action(self::PURGE_HOOK, array($this, 'run_scheduled_purge'));
                 add_action(self::PURGE_CONTINUATION_HOOK, array($this, 'run_scheduled_purge'));
@@ -292,6 +294,97 @@ if (!class_exists('Unlkr_Acquisition_Relay')) {
                 . '" data-site-key="' . $escape($config['site_key'])
                 . '" data-notice-version="' . $escape($config['notice_version'])
                 . '" data-app-origins="' . $escape(implode(',', $config['app_origins']))
+                . '" data-ttl-seconds="' . $escape((string) $config['ttl_seconds'])
+                . '" data-timeout-ms="' . $escape((string) $config['timeout_ms'])
+                . '" data-retries="' . $escape((string) $config['retries']) . '">';
+        }
+
+        /**
+         * Public, secret-free C2c touches configuration. Invalid or incomplete
+         * values keep the producer disabled and prevent its asset from being
+         * loaded. Independent of continuity: it can be enabled on its own.
+         *
+         * @return array<string, mixed>
+         */
+        public function touches_configuration()
+        {
+            $enabled = filter_var(getenv('CRM_ACQUISITION_TOUCHES_ENABLED'), FILTER_VALIDATE_BOOLEAN);
+
+            $preferences_url = trim((string) getenv('CRM_ACQUISITION_WEB_PREFERENCES_URL'));
+            $allowed_hosts = array_filter(array_map('trim', explode(',', (string) getenv('CRM_ACQUISITION_WEB_ALLOWED_HOSTS'))));
+            $preferences_parts = parse_url($preferences_url);
+            $preferences_url_is_allowed = is_array($preferences_parts)
+                && isset($preferences_parts['scheme'], $preferences_parts['host'], $preferences_parts['path'])
+                && strtolower((string) $preferences_parts['scheme']) === 'https'
+                && $preferences_parts['path'] === '/acquisition-web/preferences'
+                && (!isset($preferences_parts['port']) || (int) $preferences_parts['port'] === 443)
+                && in_array(strtolower((string) $preferences_parts['host']), array_map('strtolower', $allowed_hosts), true)
+                && !isset($preferences_parts['user']) && !isset($preferences_parts['pass'])
+                && !isset($preferences_parts['query']) && !isset($preferences_parts['fragment']);
+
+            $touches_url = trim((string) getenv('CRM_ACQUISITION_WEB_TOUCHES_URL'));
+            $touches_parts = parse_url($touches_url);
+            $touches_url_is_allowed = is_array($touches_parts)
+                && isset($touches_parts['scheme'], $touches_parts['host'], $touches_parts['path'])
+                && strtolower((string) $touches_parts['scheme']) === 'https'
+                && $touches_parts['path'] === '/acquisition-web/touches'
+                && (!isset($touches_parts['port']) || (int) $touches_parts['port'] === 443)
+                && in_array(strtolower((string) $touches_parts['host']), array_map('strtolower', $allowed_hosts), true)
+                && !isset($touches_parts['user']) && !isset($touches_parts['pass'])
+                && !isset($touches_parts['query']) && !isset($touches_parts['fragment']);
+
+            $ttl = $this->bounded_integer_environment('CRM_ACQUISITION_TOUCHES_TTL_SECONDS', 300, 60, 1800);
+            $timeout = $this->bounded_integer_environment('CRM_ACQUISITION_TOUCHES_TIMEOUT_MS', 3000, 500, 10000);
+            $retries = $this->bounded_integer_environment('CRM_ACQUISITION_TOUCHES_RETRIES', 1, 0, 2);
+            $site_key = trim((string) getenv('CRM_ACQUISITION_SITE_KEY'));
+            $notice_version = trim((string) getenv('CRM_ACQUISITION_TOUCHES_NOTICE_VERSION'));
+            $landing_key = trim((string) getenv('CRM_ACQUISITION_TOUCHES_LANDING_KEY'));
+
+            return array(
+                'enabled' => $enabled,
+                'valid' => $preferences_url_is_allowed
+                    && $touches_url_is_allowed
+                    && $ttl !== null
+                    && $timeout !== null
+                    && $retries !== null
+                    && $site_key !== '' && strlen($site_key) <= 64
+                    && $notice_version !== '' && strlen($notice_version) <= 64
+                    && $landing_key !== '' && strlen($landing_key) <= 64,
+                'preferences_url' => $preferences_url,
+                'touches_url' => $touches_url,
+                'site_key' => $site_key,
+                'notice_version' => $notice_version,
+                'landing_key' => $landing_key,
+                'ttl_seconds' => $ttl,
+                'timeout_ms' => $timeout,
+                'retries' => $retries,
+            );
+        }
+
+        /** External same-origin asset; it is independent of continuity and the MetForm relay. */
+        public function enqueue_touches_producer()
+        {
+            $config = $this->touches_configuration();
+            if (!$config['enabled'] || !$config['valid'] || !function_exists('wp_enqueue_script') || !function_exists('plugin_dir_url')) {
+                return;
+            }
+
+            wp_enqueue_script('unlkr-acquisition-touches', plugin_dir_url(__FILE__) . 'unlkr-acquisition-touches.js', array(), '1.0.0', true);
+        }
+
+        /** Emits no bearer, identity, URL, cookie value or personal data. */
+        public function render_touches_configuration()
+        {
+            $config = $this->touches_configuration();
+            if (!$config['enabled'] || !$config['valid']) {
+                return;
+            }
+            $escape = function_exists('esc_attr') ? 'esc_attr' : 'htmlspecialchars';
+            echo '<meta name="unlkr-acquisition-touches" data-preferences-url="' . $escape($config['preferences_url'])
+                . '" data-touches-url="' . $escape($config['touches_url'])
+                . '" data-site-key="' . $escape($config['site_key'])
+                . '" data-notice-version="' . $escape($config['notice_version'])
+                . '" data-landing-key="' . $escape($config['landing_key'])
                 . '" data-ttl-seconds="' . $escape((string) $config['ttl_seconds'])
                 . '" data-timeout-ms="' . $escape((string) $config['timeout_ms'])
                 . '" data-retries="' . $escape((string) $config['retries']) . '">';
