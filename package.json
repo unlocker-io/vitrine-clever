@@ -7,6 +7,7 @@
   "scripts": {
     "test:relay-dom": "node tests/unlkr-acquisition-relay-dom.test.js",
     "test:continuity-dom": "node tests/unlkr-acquisition-continuity-dom.test.js",
-    "test": "npm run test:relay-dom && npm run test:continuity-dom"
+    "test:touches-dom": "node tests/unlkr-acquisition-touches-dom.test.js",
+    "test": "npm run test:relay-dom && npm run test:continuity-dom && npm run test:touches-dom"
   }
 }
