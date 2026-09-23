@@ -113,6 +113,13 @@ function handleKey() {
   const noConsent = run({ search: '?utm_source=a&utm_medium=b&utm_campaign=c' });
   await settle();
   check(noConsent.requests.length === 0, 'no consent granted: zero requests despite recognized UTM parameters');
+  // An explicit denial/unknown consent event must never let produce() run.
+  noConsent.documentListeners.cookieyes_banner_load({ detail: { isUserActionCompleted: true, categories: { advertisement: false } } });
+  await settle();
+  check(noConsent.requests.length === 0, 'explicit denial event still sends zero requests');
+  reject(noConsent);
+  await settle();
+  check(noConsent.requests.length === 0, 'explicit revocation event still sends zero requests');
 
   // 2. No campaign params at all => the producer bails before wiring any listener.
   const noSignal = run({ search: '?ref=newsletter&page=2' });
