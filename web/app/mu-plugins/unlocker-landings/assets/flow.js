@@ -2,10 +2,70 @@
 function getCampaignContext(search) {
   const params = new URLSearchParams(search);
   const attribution = {};
-  ['utm_source', 'utm_medium', 'utm_campaign', 'utm_content', 'utm_term', 'fbclid', 'gclid'].forEach(key => {
+  ['utm_source', 'utm_medium', 'utm_campaign', 'utm_content', 'utm_term', 'utm_id', 'fbclid', 'gclid'].forEach(key => {
     if (params.has(key)) attribution[key] = params.get(key).slice(0, 200);
   });
   return { offer: params.get('offre') === 'delegation' ? 'delegation' : 'split', demo: params.get('parcours') === 'demo', attribution };
+}
+// Remembers the ISO timestamp of the FIRST arrival on any of the three
+// landing pages for the current browser session, so /demarrer/ can report
+// it even when the visitor reached it through split/delegation first.
+// sessionStorage can legitimately throw (private mode, blocked storage);
+// falling back to "now" just means no attribution window is lost, only
+// its exact start.
+function readOrStoreLandedAt() {
+  var key = 'ul_landed_at';
+  try {
+    var stored = window.sessionStorage.getItem(key);
+    if (stored) return stored;
+    var now = new Date().toISOString();
+    window.sessionStorage.setItem(key, now);
+    return now;
+  } catch (e) {
+    return new Date().toISOString();
+  }
+}
+// Reads CookieYes' own cookie directly (format:
+// "consentid:…,consent:yes,action:yes,necessary:yes,functional:no,
+// analytics:no,performance:no,advertisement:yes,other:no") rather than its
+// JS API, since this only needs a one-off snapshot at submit time, not a
+// live subscription to consent changes.
+function readConsentAdsFromCookie() {
+  try {
+    var match = document.cookie.match(/(?:^|;\s*)cookieyes-consent=([^;]*)/);
+    if (!match) return 'unknown';
+    var pairs = decodeURIComponent(match[1]).split(',');
+    for (var i = 0; i < pairs.length; i++) {
+      var pair = pairs[i].split(':');
+      if (pair[0] === 'advertisement') {
+        if (pair[1] === 'yes') return 'granted';
+        if (pair[1] === 'no') return 'denied';
+        return 'unknown';
+      }
+    }
+    return 'unknown';
+  } catch (e) {
+    return 'unknown';
+  }
+}
+// Looks up the C2c touches producer's own visitor handle (same site key,
+// same sessionStorage key shape it writes: unlkr-acquisition-touches.js).
+// Returns it only when the record is well-formed, current version, not
+// expired and matches the handle's own shape -- otherwise null, and the
+// caller simply omits visitor_handle rather than sending a bad one. The
+// consent_receipt sitting next to it in that record is never read here.
+function readVisitorHandle(siteKey) {
+  if (!siteKey) return null;
+  try {
+    var raw = window.sessionStorage.getItem('unlkr_acquisition_touches_handle_v1_' + siteKey);
+    if (!raw) return null;
+    var record = JSON.parse(raw);
+    if (!record || record.v !== 1 || typeof record.expires_at !== 'number' || record.expires_at <= Date.now()) return null;
+    var handle = record.visitor_handle;
+    return typeof handle === 'string' && /^av1_[A-Za-z0-9_-]{43}$/.test(handle) ? handle : null;
+  } catch (e) {
+    return null;
+  }
 }
 function trackLeadConversion(offer, parcours) {
   try {
@@ -20,6 +80,7 @@ function trackLeadConversion(offer, parcours) {
   } catch (e) { /* conversion pixels are best-effort */ }
 }
 if (typeof document !== 'undefined') {
+  readOrStoreLandedAt();
   const campaign = getCampaignContext(window.location.search);
   const config = (typeof window !== 'undefined' && window.unlockerLanding) || {};
   document.querySelectorAll('[data-ul-start]').forEach(link => {
@@ -58,8 +119,12 @@ if (typeof document !== 'undefined') {
         offer: campaign.offer,
         parcours: parcours,
         page_url: window.location.href.split('#')[0],
-        website: websiteField ? websiteField.value : ''
+        website: websiteField ? websiteField.value : '',
+        consent_ads: readConsentAdsFromCookie(),
+        landed_at: readOrStoreLandedAt()
       }, campaign.attribution);
+      const visitorHandle = readVisitorHandle(config.siteKey);
+      if (visitorHandle) body.visitor_handle = visitorHandle;
       fetch(config.endpoint || '', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
