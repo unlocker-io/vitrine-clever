@@ -140,3 +140,26 @@ function has_allowed_src(\WP_Dependencies $registry, string $handle): bool
 
     return false;
 }
+
+add_filter('unlkr_acquisition_touches_landing_key', __NAMESPACE__ . '\\touches_landing_key_override');
+
+/**
+ * C2c uses one site-wide landing key by default (CRM_ACQUISITION_TOUCHES_LANDING_KEY).
+ * The two ad-facing mountain landings must be distinguishable in the CRM, so this
+ * override replaces it only on those two templates; every other page (including
+ * /demarrer/) keeps the site-wide value untouched.
+ */
+function touches_landing_key_override(string $landing_key): string
+{
+    $slug = get_landing_template();
+
+    if ($slug === TEMPLATE_SPLIT) {
+        return 'mountain_split';
+    }
+
+    if ($slug === TEMPLATE_DELEGATION) {
+        return 'mountain_delegation';
+    }
+
+    return $landing_key;
+}

@@ -339,6 +339,9 @@ if (!class_exists('Unlkr_Acquisition_Relay')) {
             $site_key = trim((string) getenv('CRM_ACQUISITION_SITE_KEY'));
             $notice_version = trim((string) getenv('CRM_ACQUISITION_TOUCHES_NOTICE_VERSION'));
             $landing_key = trim((string) getenv('CRM_ACQUISITION_TOUCHES_LANDING_KEY'));
+            if (function_exists('apply_filters')) {
+                $landing_key = (string) apply_filters('unlkr_acquisition_touches_landing_key', $landing_key);
+            }
 
             return array(
                 'enabled' => $enabled,
