@@ -30,7 +30,7 @@ const CRM_MAX_BODY_BYTES = 32768;
 // Same shape as the touches producer's own handlePattern
 // (unlkr-acquisition-touches.js) -- a handle failing this is never the
 // producer's, so it is dropped rather than forwarded.
-const CRM_VISITOR_HANDLE_PATTERN = '/^av1_[A-Za-z0-9_-]{44}$/';
+const CRM_VISITOR_HANDLE_PATTERN = '/^av1_[A-Za-z0-9_-]{43}$/';
 
 /** @var string[] */
 const LEAD_SIZE_OPTIONS = ['1–9', '10–24', '25–49', '50–99', '100+'];
