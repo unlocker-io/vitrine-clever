@@ -95,7 +95,10 @@
       "php -r \"copy('.env.example', '.env');\""
     ],
     "test": [
-      "phpcs"
-    ]
+      "@phpcs",
+      "@relay-tests"
+    ],
+    "phpcs": "phpcs",
+    "relay-tests": "php tests/unlkr-acquisition-relay-test.php"
   }
 }
