@@ -64,6 +64,36 @@ dépôt :**
   dans l’environnement de production réel avant activation**, ce document ne peut pas le
   vérifier depuis ce dépôt.
 
+## Chargement de l’asset sur les landings, et `landing_key` par gabarit
+
+**Correctif de la liste blanche.** `dequeue_foreign_assets()` (dans
+`unlocker-landings/inc/assets.php`) désenfile, sur les trois gabarits de landing (split,
+délégation, démarrer), tout script et style dont le `src` ne matche pas une liste blanche
+fermée (`has_allowed_src()`). Cette liste ne couvrait jusqu’ici que quatre plugins tiers
+(CookieYes, PixelYourSite, Site Kit, Yoast) : `unlkr-acquisition-touches.js` — et, avec lui,
+les autres producteurs `unlkr-acquisition-*` (relais C2a, continuité C2d) — en étaient exclu et
+donc systématiquement désenfilé sur les trois landings, alors même que sa méta-config
+`<meta name="unlkr-acquisition-touches" …>` était bien imprimée par le relais (l’enfilement et
+l’injection de la méta-config sont deux mécanismes indépendants). Le correctif ajoute la
+needle `/mu-plugins/unlkr-acquisition-` à `$needles`, ce qui couvre par construction les trois
+fichiers servis depuis `.../app/mu-plugins/` sur les trois gabarits. La dépendance
+(`enqueue_touches_producer()` enfile `unlkr-acquisition-touches` sans aucune dépendance de
+script) garantit par ailleurs qu’il ne peut jamais être bloqué en cascade par le désenfilement
+d’un autre script.
+
+**`landing_key` propre aux deux landings publicitaires.** `touches_configuration()` lit la
+valeur globale `CRM_ACQUISITION_TOUCHES_LANDING_KEY`, puis la fait passer par un filtre
+WordPress générique, `unlkr_acquisition_touches_landing_key` — le relais ne connaît rien de
+`unlocker-landings`, il expose juste un point d’extension. `unlocker-landings` y accroche
+`touches_landing_key_override()` (dans `inc/assets.php`) qui remplace cette valeur par
+`mountain_split` sur `/split-de-paiement-conciergerie/` et par `mountain_delegation` sur
+`/delegation-carte-g-location-saisonniere/`. Partout ailleurs — y compris `/demarrer/` et le
+reste du site — la valeur globale `CRM_ACQUISITION_TOUCHES_LANDING_KEY` traverse le filtre
+inchangée. Comme rappelé plus haut, `mountain_split` et `mountain_delegation` doivent être
+enregistrées côté CRM dans `crm.acquisition.landing_keys` avant toute activation sur ces deux
+landings, sous peine du même 412 ; la valeur globale existante n’est pas concernée par ce
+risque si elle y figure déjà.
+
 ## Consentement (CookieYes)
 
 Le producteur réutilise exactement le mécanisme de C2d : les événements officiels
