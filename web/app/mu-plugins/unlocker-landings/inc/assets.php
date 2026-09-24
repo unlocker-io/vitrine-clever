@@ -84,8 +84,9 @@ add_action('template_redirect', function (): void {
 
 /**
  * Dequeues every style and script on our three templates except our own and
- * an explicit allow-list (CookieYes, PixelYourSite, Site Kit, Yoast),
- * matched by their registered src. Everything else -- the theme, Elementor,
+ * an explicit allow-list (CookieYes, PixelYourSite, Site Kit, Yoast, the
+ * `unlkr-acquisition-*` consent-relay producers), matched by their
+ * registered src. Everything else -- the theme, Elementor,
  * Elementor Pro, JKit, The Plus, MetForm, Nexter, WP core's block-library /
  * global-styles / classic-theme-styles -- is dequeued, not deregistered, so
  * a genuine dependency (e.g. an allow-listed plugin needing jQuery) still
@@ -121,6 +122,7 @@ function has_allowed_src(\WP_Dependencies $registry, string $handle): bool
         '/plugins/pixelyoursite/',
         '/plugins/google-site-kit/',
         '/plugins/wordpress-seo/',
+        '/mu-plugins/unlkr-acquisition-',
     ];
 
     $item = $registry->registered[$handle] ?? null;
