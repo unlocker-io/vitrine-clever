@@ -40,6 +40,24 @@
       }
     },
     {
+      "type": "package",
+      "package": {
+        "name": "yoast/wordpress-seo-premium",
+        "version": "28.5",
+        "type": "wordpress-plugin",
+        "dist": {
+          "type": "zip",
+          "url": "packages/wordpress-seo-premium-28.5.zip"
+        },
+        "require": {
+          "composer/installers": "^2.2"
+        },
+        "extra": {
+          "installer-name": "wordpress-seo-premium"
+        }
+      }
+    },
+    {
       "type": "composer",
       "url": "https://wpackagist.org"
     },
@@ -80,7 +98,8 @@
     "wpackagist-theme/hello-elementor": "^3.4.5",
     "wpackagist-theme/twentytwentyone": "^2.7",
     "wpackagist-theme/twentytwentythree": "^1.6",
-    "wpackagist-theme/twentytwentytwo": "^2.1"
+    "wpackagist-theme/twentytwentytwo": "^2.1",
+    "yoast/wordpress-seo-premium": "28.5"
   },
   "require-dev": {
     "squizlabs/php_codesniffer": "^3.4.2",
