@@ -25,6 +25,21 @@
   },
   "repositories": [
     {
+      "type": "package",
+      "package": {
+        "name": "roots/wordpress-no-content",
+        "version": "6.9.9",
+        "type": "wordpress-core",
+        "dist": {
+          "type": "zip",
+          "url": "https://codeload.github.com/WordPress/WordPress/zip/refs/tags/6.9.9"
+        },
+        "require": {
+          "php": ">= 7.2.24"
+        }
+      }
+    },
+    {
       "type": "composer",
       "url": "https://wpackagist.org"
     },
