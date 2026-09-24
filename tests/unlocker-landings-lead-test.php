@@ -229,6 +229,28 @@ $tooOld = (new DateTimeImmutable('now', new DateTimeZone('UTC')))->modify('-31 d
 check('landed_at >30 days old: no error', !isset($errors['landed_at']));
 check('landed_at >30 days old: dropped', !isset($lead['landed_at']));
 
+// -- visitor_handle: optional, silently dropped when malformed --------------
+
+[$errors, $lead] = validate_lead(validSubmission([]));
+check('visitor_handle absent: no error', !isset($errors['visitor_handle']));
+check('visitor_handle absent: not in lead', !isset($lead['visitor_handle']));
+
+$validHandle = 'av1_' . str_repeat('a', 43);
+[$errors, $lead] = validate_lead(validSubmission(['visitor_handle' => $validHandle]));
+check('visitor_handle valid: no error', !isset($errors['visitor_handle']));
+check('visitor_handle valid: kept as-is', ($lead['visitor_handle'] ?? null) === $validHandle);
+
+foreach ([
+    'wrong prefix' => 'zz1_' . str_repeat('a', 43),
+    'too short' => 'av1_' . str_repeat('a', 42),
+    'too long' => 'av1_' . str_repeat('a', 44),
+    'bad character' => 'av1_' . str_repeat('a', 42) . '!',
+] as $label => $malformedHandle) {
+    [$errors, $lead] = validate_lead(validSubmission(['visitor_handle' => $malformedHandle]));
+    check("visitor_handle {$label}: no error (never a 422)", !isset($errors['visitor_handle']));
+    check("visitor_handle {$label}: dropped", !isset($lead['visitor_handle']));
+}
+
 // -- crm_payload: mapping, allow-listed keys only, submission_id -------------
 
 function crmLead(array $overrides = []): array
@@ -260,6 +282,15 @@ check('crm_payload: offer delegation -> delegation_g', crm_payload(crmLead(['off
 // submission_id passthrough.
 $payload = crm_payload(crmLead(), 'a1b2c3d4-e5f6-4789-a123-456789abcdef', 'mountain_split', 'notice-1', $fixedNow);
 check('crm_payload: submission_id equals the argument', $payload['submission_id'] === 'a1b2c3d4-e5f6-4789-a123-456789abcdef');
+
+// visitor_handle: the validated value when present, null otherwise -- never sent to Brevo.
+$payloadWithHandle = crm_payload(crmLead(['visitor_handle' => $validHandle]), 'sub-1', 'mountain_split', 'notice-1', $fixedNow);
+check('crm_payload: visitor_handle passthrough when valid', $payloadWithHandle['visitor_handle'] === $validHandle);
+
+$payloadWithoutHandle = crm_payload(crmLead(), 'sub-1', 'mountain_split', 'notice-1', $fixedNow);
+check('crm_payload: visitor_handle null when absent', $payloadWithoutHandle['visitor_handle'] === null);
+
+check('brevo payload: never carries visitor_handle', !array_key_exists('VISITOR_HANDLE', brevo_payload(crmLead(['visitor_handle' => $validHandle]), 117)['attributes']));
 
 // phone normalization.
 $phoneFr = crm_payload(crmLead(['country' => 'FR', 'phone' => '06 12 34 56 78']), 'sub-1', 'mountain_split', 'notice-1', $fixedNow)['contact']['phone'];

@@ -27,6 +27,11 @@ const CRM_DEFAULT_LANDING_KEY_DELEGATION = 'mountain_delegation';
 const CRM_API_PATH = '/api/v1/acquisition/requests';
 const CRM_MAX_BODY_BYTES = 32768;
 
+// Same shape as the touches producer's own handlePattern
+// (unlkr-acquisition-touches.js) -- a handle failing this is never the
+// producer's, so it is dropped rather than forwarded.
+const CRM_VISITOR_HANDLE_PATTERN = '/^av1_[A-Za-z0-9_-]{44}$/';
+
 /** @var string[] */
 const LEAD_SIZE_OPTIONS = ['1–9', '10–24', '25–49', '50–99', '100+'];
 
@@ -207,6 +212,16 @@ function validate_lead(array $input): array
         }
     }
 
+    // Optional and never rejected: an absent or malformed handle (wrong
+    // producer, wrong version, tampered) is silently ignored rather than
+    // failing the whole submission -- it's the C2c touches producer's own
+    // identifier, not something this form can itself validate further.
+    $visitorHandle = trim((string) ($input['visitor_handle'] ?? ''));
+
+    if ($visitorHandle !== '' && preg_match(CRM_VISITOR_HANDLE_PATTERN, $visitorHandle) === 1) {
+        $lead['visitor_handle'] = $visitorHandle;
+    }
+
     return [$errors, $lead];
 }
 
@@ -277,7 +292,7 @@ function crm_payload(array $lead, string $submissionId, string $landingKey, stri
     $payload = [
         'schema_version' => 1,
         'submission_id' => $submissionId,
-        'visitor_handle' => null,
+        'visitor_handle' => $lead['visitor_handle'] ?? null,
         'contact' => [
             'email' => $lead['email'] ?? '',
             'name' => null,
@@ -990,6 +1005,10 @@ function inject_lead_form_config(): void
         'endpoint' => rest_url('unlocker-landings/v1/lead'),
         'split' => split_url(),
         'delegation' => delegation_url(),
+        // Lets flow.js look up the C2c touches producer's own visitor
+        // handle in sessionStorage (same site key, same storage key shape).
+        // Empty when unset -- flow.js then never attempts the lookup.
+        'siteKey' => trim((string) getenv('CRM_ACQUISITION_SITE_KEY')),
     ];
 
     wp_add_inline_script(

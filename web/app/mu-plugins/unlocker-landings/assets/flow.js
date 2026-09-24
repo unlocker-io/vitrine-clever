@@ -48,6 +48,25 @@ function readConsentAdsFromCookie() {
     return 'unknown';
   }
 }
+// Looks up the C2c touches producer's own visitor handle (same site key,
+// same sessionStorage key shape it writes: unlkr-acquisition-touches.js).
+// Returns it only when the record is well-formed, current version, not
+// expired and matches the handle's own shape -- otherwise null, and the
+// caller simply omits visitor_handle rather than sending a bad one. The
+// consent_receipt sitting next to it in that record is never read here.
+function readVisitorHandle(siteKey) {
+  if (!siteKey) return null;
+  try {
+    var raw = window.sessionStorage.getItem('unlkr_acquisition_touches_handle_v1_' + siteKey);
+    if (!raw) return null;
+    var record = JSON.parse(raw);
+    if (!record || record.v !== 1 || typeof record.expires_at !== 'number' || record.expires_at <= Date.now()) return null;
+    var handle = record.visitor_handle;
+    return typeof handle === 'string' && /^av1_[A-Za-z0-9_-]{43}$/.test(handle) ? handle : null;
+  } catch (e) {
+    return null;
+  }
+}
 function trackLeadConversion(offer, parcours) {
   try {
     if (typeof fbq === 'function') fbq('track', 'Lead', { content_name: offer });
@@ -104,6 +123,8 @@ if (typeof document !== 'undefined') {
         consent_ads: readConsentAdsFromCookie(),
         landed_at: readOrStoreLandedAt()
       }, campaign.attribution);
+      const visitorHandle = readVisitorHandle(config.siteKey);
+      if (visitorHandle) body.visitor_handle = visitorHandle;
       fetch(config.endpoint || '', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
