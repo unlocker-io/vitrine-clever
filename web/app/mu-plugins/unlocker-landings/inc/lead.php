@@ -265,7 +265,7 @@ function handle_lead_request(\WP_REST_Request $request): \WP_REST_Response
         return new \WP_REST_Response(['ok' => true], 200);
     }
 
-    $ip = (string) ($_SERVER['REMOTE_ADDR'] ?? '');
+    $ip = lead_client_ip($_SERVER);
     $rateLimitKey = lead_rate_limit_key($ip);
 
     if (is_lead_rate_limited($rateLimitKey)) {
@@ -287,6 +287,30 @@ function handle_lead_request(\WP_REST_Request $request): \WP_REST_Response
     }
 
     return new \WP_REST_Response(['ok' => true], 200);
+}
+
+/**
+ * Client IP as seen by the Clever Cloud edge proxy.
+ *
+ * REMOTE_ADDR is the proxy itself; the proxy appends the real client address
+ * as the LAST X-Forwarded-For entry (entries on the left are client-supplied).
+ *
+ * @param array<string, mixed> $server
+ */
+function lead_client_ip(array $server): string
+{
+    $forwarded = (string) ($server['HTTP_X_FORWARDED_FOR'] ?? '');
+
+    if ($forwarded !== '') {
+        $parts = array_map('trim', explode(',', $forwarded));
+        $last = (string) end($parts);
+
+        if (filter_var($last, FILTER_VALIDATE_IP) !== false) {
+            return $last;
+        }
+    }
+
+    return (string) ($server['REMOTE_ADDR'] ?? '');
 }
 
 function lead_rate_limit_key(string $ip): string

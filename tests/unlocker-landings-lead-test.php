@@ -36,6 +36,7 @@ require __DIR__ . '/../web/app/mu-plugins/unlocker-landings/inc/lead.php';
 
 use function Unlocker\Landings\brevo_payload;
 use function Unlocker\Landings\validate_lead;
+use function Unlocker\Landings\lead_client_ip;
 
 $assertions = 0;
 $failures = 0;
@@ -154,6 +155,13 @@ check('brevo payload: utm_source still present', $payload['attributes']['UTM_SOU
 $payloadWithPhone = brevo_payload($leadWithPhone, 42);
 check('brevo payload: listIds reflects argument', $payloadWithPhone['listIds'] === [42]);
 check('brevo payload: TELEPHONE present when phone given', $payloadWithPhone['attributes']['TELEPHONE'] === $leadWithPhone['phone']);
+
+// -- lead_client_ip: proxy X-Forwarded-For handling --------------------------
+
+check('client_ip: uses last X-Forwarded-For when multiple', lead_client_ip(['HTTP_X_FORWARDED_FOR' => '1.1.1.1, 203.0.113.9', 'REMOTE_ADDR' => '10.0.0.1']) === '203.0.113.9');
+check('client_ip: uses X-Forwarded-For when single', lead_client_ip(['HTTP_X_FORWARDED_FOR' => '203.0.113.9', 'REMOTE_ADDR' => '10.0.0.1']) === '203.0.113.9');
+check('client_ip: falls back to REMOTE_ADDR on invalid X-Forwarded-For', lead_client_ip(['HTTP_X_FORWARDED_FOR' => 'garbage', 'REMOTE_ADDR' => '10.0.0.1']) === '10.0.0.1');
+check('client_ip: uses REMOTE_ADDR when no X-Forwarded-For', lead_client_ip(['REMOTE_ADDR' => '10.0.0.1']) === '10.0.0.1');
 
 // --------------------------------------------------------------------------
 
