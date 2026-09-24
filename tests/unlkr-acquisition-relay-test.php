@@ -11,9 +11,13 @@ $GLOBALS['unlkr_before_insert'] = null;
 $GLOBALS['unlkr_cron'] = array();
 $GLOBALS['unlkr_option_ids'] = array();
 $GLOBALS['unlkr_next_option_id'] = 1;
+$GLOBALS['unlkr_actions'] = array();
+$GLOBALS['unlkr_enqueued_scripts'] = array();
 
-function add_action() {}
+function add_action($hook, $callback, $priority = 10, $accepted_args = 1) { $GLOBALS['unlkr_actions'][] = array($hook, $callback, $priority, $accepted_args); }
 function add_filter() {}
+function plugin_dir_url() { return 'https://public.example.test/app/mu-plugins/'; }
+function wp_enqueue_script($handle, $src, $dependencies = array(), $version = false, $in_footer = false) { $GLOBALS['unlkr_enqueued_scripts'][$handle] = array('src' => $src, 'dependencies' => $dependencies, 'version' => $version, 'in_footer' => $in_footer); }
 function wp_generate_uuid4() { static $n = 0; $n++; return sprintf('00000000-0000-4000-8000-%012d', $n); }
 function get_option($name, $default = false) { return array_key_exists($name, $GLOBALS['unlkr_options']) ? $GLOBALS['unlkr_options'][$name] : $default; }
 function wp_cache_delete() {}
@@ -45,7 +49,7 @@ function response($code) { return array('response' => array('code' => $code)); }
 function body_at($request_index) { return json_decode($GLOBALS['unlkr_http_requests'][$request_index][1]['body'], true); }
 function last_body() { return body_at(count($GLOBALS['unlkr_http_requests']) - 1); }
 function env_reset() {
-    foreach (array('CRM_ACQUISITION_RELAY_ENABLED', 'CRM_ACQUISITION_API_URL', 'CRM_ACQUISITION_ALLOWED_HOSTS', 'CRM_ACQUISITION_SERVICE_TOKEN', 'CRM_ACQUISITION_METFORM_FORM_ID', 'CRM_ACQUISITION_LANDING_KEY', 'CRM_ACQUISITION_PRIVACY_NOTICE_VERSION', 'CRM_ACQUISITION_CONSENT_GATE_CONFIRMED', 'CRM_ACQUISITION_ATTEMPT_RETENTION_DAYS', 'CRM_ACQUISITION_FIELD_EMAIL', 'CRM_ACQUISITION_FIELD_NAME', 'CRM_ACQUISITION_FIELD_PHONE', 'CRM_ACQUISITION_FIELD_BUSINESS_NAME', 'CRM_ACQUISITION_FIELD_COUNTRY', 'CRM_ACQUISITION_FIELD_AREA', 'CRM_ACQUISITION_FIELD_PROPERTY_COUNT_BAND', 'CRM_ACQUISITION_FIELD_OFFER', 'CRM_ACQUISITION_FIELD_ADS_MEASUREMENT', 'CRM_ACQUISITION_FIELD_ADS_SHARING', 'CRM_ACQUISITION_FIELD_MARKETING_OPT_IN', 'CRM_ACQUISITION_FIELD_ATTEMPT_TOKEN') as $key) { putenv($key); }
+    foreach (array('CRM_ACQUISITION_RELAY_ENABLED', 'CRM_ACQUISITION_API_URL', 'CRM_ACQUISITION_ALLOWED_HOSTS', 'CRM_ACQUISITION_SERVICE_TOKEN', 'CRM_ACQUISITION_METFORM_FORM_ID', 'CRM_ACQUISITION_LANDING_KEY', 'CRM_ACQUISITION_PRIVACY_NOTICE_VERSION', 'CRM_ACQUISITION_CONSENT_GATE_CONFIRMED', 'CRM_ACQUISITION_ATTEMPT_RETENTION_DAYS', 'CRM_ACQUISITION_FIELD_EMAIL', 'CRM_ACQUISITION_FIELD_NAME', 'CRM_ACQUISITION_FIELD_PHONE', 'CRM_ACQUISITION_FIELD_BUSINESS_NAME', 'CRM_ACQUISITION_FIELD_COUNTRY', 'CRM_ACQUISITION_FIELD_AREA', 'CRM_ACQUISITION_FIELD_PROPERTY_COUNT_BAND', 'CRM_ACQUISITION_FIELD_OFFER', 'CRM_ACQUISITION_FIELD_ADS_MEASUREMENT', 'CRM_ACQUISITION_FIELD_ADS_SHARING', 'CRM_ACQUISITION_FIELD_MARKETING_OPT_IN', 'CRM_ACQUISITION_FIELD_ATTEMPT_TOKEN', 'CRM_ACQUISITION_CONTINUITY_ENABLED', 'CRM_ACQUISITION_WEB_PREFERENCES_URL', 'CRM_ACQUISITION_WEB_ALLOWED_HOSTS', 'CRM_ACQUISITION_SITE_KEY', 'CRM_ACQUISITION_CONTINUITY_NOTICE_VERSION', 'CRM_ACQUISITION_CONTINUITY_APP_ORIGINS', 'CRM_ACQUISITION_CONTINUITY_TTL_SECONDS', 'CRM_ACQUISITION_CONTINUITY_TIMEOUT_MS', 'CRM_ACQUISITION_CONTINUITY_RETRIES', 'CRM_ACQUISITION_TOUCHES_ENABLED', 'CRM_ACQUISITION_WEB_TOUCHES_URL', 'CRM_ACQUISITION_TOUCHES_NOTICE_VERSION', 'CRM_ACQUISITION_TOUCHES_LANDING_KEY', 'CRM_ACQUISITION_TOUCHES_TTL_SECONDS', 'CRM_ACQUISITION_TOUCHES_TIMEOUT_MS', 'CRM_ACQUISITION_TOUCHES_RETRIES') as $key) { putenv($key); }
 }
 function configure() {
     env_reset();
@@ -62,6 +66,29 @@ function configure() {
         'CRM_ACQUISITION_FIELD_BUSINESS_NAME=business', 'CRM_ACQUISITION_FIELD_COUNTRY=country', 'CRM_ACQUISITION_FIELD_AREA=area',
         'CRM_ACQUISITION_FIELD_PROPERTY_COUNT_BAND=band', 'CRM_ACQUISITION_FIELD_OFFER=offer',
         'CRM_ACQUISITION_FIELD_ADS_MEASUREMENT=measure', 'CRM_ACQUISITION_FIELD_ADS_SHARING=sharing', 'CRM_ACQUISITION_FIELD_MARKETING_OPT_IN=marketing', 'CRM_ACQUISITION_FIELD_ATTEMPT_TOKEN=unlkr_attempt',
+    ) as $entry) { putenv($entry); }
+}
+function configure_continuity() {
+    env_reset();
+    foreach (array(
+        'CRM_ACQUISITION_CONTINUITY_ENABLED=1',
+        'CRM_ACQUISITION_WEB_PREFERENCES_URL=https://crm.example.test/acquisition-web/preferences',
+        'CRM_ACQUISITION_WEB_ALLOWED_HOSTS=crm.example.test',
+        'CRM_ACQUISITION_SITE_KEY=unlocker-web',
+        'CRM_ACQUISITION_CONTINUITY_NOTICE_VERSION=2026-09',
+        'CRM_ACQUISITION_CONTINUITY_APP_ORIGINS=https://app.example.test,https://staging.example.test',
+    ) as $entry) { putenv($entry); }
+}
+function configure_touches() {
+    env_reset();
+    foreach (array(
+        'CRM_ACQUISITION_WEB_PREFERENCES_URL=https://crm.example.test/acquisition-web/preferences',
+        'CRM_ACQUISITION_WEB_ALLOWED_HOSTS=crm.example.test',
+        'CRM_ACQUISITION_SITE_KEY=unlocker-web',
+        'CRM_ACQUISITION_TOUCHES_ENABLED=1',
+        'CRM_ACQUISITION_WEB_TOUCHES_URL=https://crm.example.test/acquisition-web/touches',
+        'CRM_ACQUISITION_TOUCHES_NOTICE_VERSION=2026-09',
+        'CRM_ACQUISITION_TOUCHES_LANDING_KEY=vitrine_web',
     ) as $entry) { putenv($entry); }
 }
 function form_data($attempt) { return array('id' => 42, 'email' => 'hello@example.test', 'name' => 'Alex', 'phone' => '', 'business' => 'Alpine Services', 'country' => 'fr', 'area' => 'Savoie', 'band' => '10_49', 'offer' => 'split', 'measure' => 'denied', 'sharing' => 'denied', 'marketing' => '0', 'unlkr_attempt' => $attempt); }
@@ -203,7 +230,75 @@ $before_disabled = count($GLOBALS['unlkr_http_requests']);
 $relay->after_store(42, form_data($attempt_a), array(), official_attributes());
 $relay->manage_purge_schedule();
 check(count($GLOBALS['unlkr_http_requests']) === $before_disabled && !isset($GLOBALS['unlkr_cron']['unlkr_acquisition_relay_purge']) && !isset($GLOBALS['unlkr_cron']['unlkr_acquisition_relay_purge_continuation']), 'disabled relay neither sends nor schedules daily or continuation purge work');
+
+configure_continuity();
+$continuity = $relay->continuity_configuration();
+check($continuity['enabled'] && $continuity['valid'], 'continuity producer accepts a complete explicit configuration');
+check($continuity['ttl_seconds'] === 300 && $continuity['timeout_ms'] === 3000 && $continuity['retries'] === 1, 'continuity TTL, timeout and retries have bounded defaults');
+$continuity_meta_priority = null;
+foreach ($GLOBALS['unlkr_actions'] as $registered_action) {
+    if ($registered_action[0] === 'wp_head' && is_array($registered_action[1]) && $registered_action[1][1] === 'render_continuity_configuration') {
+        $continuity_meta_priority = $registered_action[2];
+    }
+}
+check($continuity_meta_priority === 100, 'WordPress registers continuity metadata in wp_head at priority 100');
+$GLOBALS['unlkr_enqueued_scripts'] = array();
+$relay->enqueue_continuity_producer();
+check(isset($GLOBALS['unlkr_enqueued_scripts']['unlkr-acquisition-continuity']) && $GLOBALS['unlkr_enqueued_scripts']['unlkr-acquisition-continuity']['in_footer'] === true, 'WordPress places continuity script in footer after head metadata');
+ob_start();
+$relay->render_continuity_configuration();
+$continuity_meta = ob_get_clean();
+check(strpos($continuity_meta, 'data-site-key="unlocker-web"') !== false && strpos($continuity_meta, 'Bearer') === false, 'public continuity metadata contains no credential');
+putenv('CRM_ACQUISITION_CONTINUITY_TTL_SECONDS=1801');
+check(!$relay->continuity_configuration()['valid'], 'continuity TTL above the hard maximum fails closed');
+configure_continuity();
+putenv('CRM_ACQUISITION_CONTINUITY_APP_ORIGINS=https://app.example.test/path');
+check(!$relay->continuity_configuration()['valid'], 'app allowlist accepts only exact origins without paths');
+configure_continuity();
+putenv('CRM_ACQUISITION_WEB_PREFERENCES_URL=https://evil.example.test/acquisition-web/preferences');
+check(!$relay->continuity_configuration()['valid'], 'CRM preferences host outside its allowlist fails closed');
+configure_continuity();
+putenv('CRM_ACQUISITION_CONTINUITY_ENABLED=0');
+ob_start();
+$relay->render_continuity_configuration();
+$disabled_meta = ob_get_clean();
+check($disabled_meta === '', 'continuity feature is silent when explicitly disabled');
 $source = file_get_contents(dirname(__DIR__) . '/web/app/mu-plugins/unlkr-acquisition-relay.php');
 check(strpos($source, 'error_log') === false && strpos($source, 'wp_safe_remote_post') !== false && strpos($source, 'wp_remote_post') === false && strpos($source, 'INSERT IGNORE') !== false && strpos($source, 'JSON_EXTRACT') === false, 'relay has no secret logs, uses safe HTTP, non-overwriting insert and no JSON SQL');
 
-echo "OK - 28 assertions\n";
+configure_touches();
+$touches = $relay->touches_configuration();
+check($touches['enabled'] && $touches['valid'], 'touches producer accepts a complete explicit configuration');
+check($touches['ttl_seconds'] === 300 && $touches['timeout_ms'] === 3000 && $touches['retries'] === 1, 'touches TTL, timeout and retries have bounded defaults');
+check($touches['landing_key'] === 'vitrine_web' && $touches['site_key'] === 'unlocker-web', 'touches producer carries its own fixed landing key and the shared site key');
+$touches_meta_priority = null;
+foreach ($GLOBALS['unlkr_actions'] as $registered_action) {
+    if ($registered_action[0] === 'wp_head' && is_array($registered_action[1]) && $registered_action[1][1] === 'render_touches_configuration') {
+        $touches_meta_priority = $registered_action[2];
+    }
+}
+check($touches_meta_priority === 100, 'WordPress registers touches metadata in wp_head at priority 100');
+$GLOBALS['unlkr_enqueued_scripts'] = array();
+$relay->enqueue_touches_producer();
+check(isset($GLOBALS['unlkr_enqueued_scripts']['unlkr-acquisition-touches']) && $GLOBALS['unlkr_enqueued_scripts']['unlkr-acquisition-touches']['in_footer'] === true, 'WordPress places touches script in footer after head metadata');
+ob_start();
+$relay->render_touches_configuration();
+$touches_meta = ob_get_clean();
+check(strpos($touches_meta, 'data-site-key="unlocker-web"') !== false && strpos($touches_meta, 'data-landing-key="vitrine_web"') !== false && strpos($touches_meta, 'Bearer') === false, 'public touches metadata contains no credential');
+configure_touches();
+putenv('CRM_ACQUISITION_TOUCHES_TTL_SECONDS=1801');
+check(!$relay->touches_configuration()['valid'], 'touches TTL above the hard maximum fails closed');
+configure_touches();
+putenv('CRM_ACQUISITION_WEB_TOUCHES_URL=https://evil.example.test/acquisition-web/touches');
+check(!$relay->touches_configuration()['valid'], 'touches URL host outside the shared allowlist fails closed');
+configure_touches();
+putenv('CRM_ACQUISITION_WEB_TOUCHES_URL=https://crm.example.test/acquisition-web/preferences');
+check(!$relay->touches_configuration()['valid'], 'touches URL must target the touches path, not the preferences path');
+configure_touches();
+putenv('CRM_ACQUISITION_TOUCHES_ENABLED=0');
+ob_start();
+$relay->render_touches_configuration();
+$disabled_touches_meta = ob_get_clean();
+check($disabled_touches_meta === '', 'touches feature is silent when explicitly disabled');
+
+echo "OK - 52 assertions\n";

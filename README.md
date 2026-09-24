@@ -1,5 +1,9 @@
 # Deploy WordPress on CleverCloud, the immutable way
 
+Les intégrations Unlocker spécifiques sont documentées dans
+[`docs/crm-acquisition-relay.md`](docs/crm-acquisition-relay.md) et
+[`docs/crm-acquisition-continuity.md`](docs/crm-acquisition-continuity.md).
+
 ## What is this?
 
 [Bedrock](https://roots.io/bedrock/) ([GitHub Project](https://github.com/roots/bedrock)) is a modern WordPress stack that allows to maintain your installation clean from any code change during runtime. [CleverCloud](https://www.clever-cloud.com/) is a rock solid IT automation platform.
