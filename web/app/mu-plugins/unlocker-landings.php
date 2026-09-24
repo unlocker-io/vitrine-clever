@@ -18,4 +18,5 @@ require_once __DIR__ . '/unlocker-landings/inc/constants.php';
 require_once __DIR__ . '/unlocker-landings/inc/faq.php';
 require_once __DIR__ . '/unlocker-landings/inc/templates.php';
 require_once __DIR__ . '/unlocker-landings/inc/assets.php';
+require_once __DIR__ . '/unlocker-landings/inc/lead.php';
 require_once __DIR__ . '/unlocker-landings/inc/seo.php';
