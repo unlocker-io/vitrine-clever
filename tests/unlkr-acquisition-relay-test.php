@@ -16,6 +16,12 @@ $GLOBALS['unlkr_enqueued_scripts'] = array();
 
 function add_action($hook, $callback, $priority = 10, $accepted_args = 1) { $GLOBALS['unlkr_actions'][] = array($hook, $callback, $priority, $accepted_args); }
 function add_filter() {}
+// No filter is ever really registered by add_filter() above in this file: this
+// stub only lets touches_configuration() call apply_filters() without a fatal
+// error. It is a pure passthrough, so it changes none of the assertions below
+// -- this file tests the relay in isolation, not its integration with
+// unlocker-landings (covered by tests/unlocker-landings-touches-test.php).
+function apply_filters($hook, $value) { return $value; }
 function plugin_dir_url() { return 'https://public.example.test/app/mu-plugins/'; }
 function wp_enqueue_script($handle, $src, $dependencies = array(), $version = false, $in_footer = false) { $GLOBALS['unlkr_enqueued_scripts'][$handle] = array('src' => $src, 'dependencies' => $dependencies, 'version' => $version, 'in_footer' => $in_footer); }
 function wp_generate_uuid4() { static $n = 0; $n++; return sprintf('00000000-0000-4000-8000-%012d', $n); }
@@ -281,6 +287,7 @@ check($touches_meta_priority === 100, 'WordPress registers touches metadata in w
 $GLOBALS['unlkr_enqueued_scripts'] = array();
 $relay->enqueue_touches_producer();
 check(isset($GLOBALS['unlkr_enqueued_scripts']['unlkr-acquisition-touches']) && $GLOBALS['unlkr_enqueued_scripts']['unlkr-acquisition-touches']['in_footer'] === true, 'WordPress places touches script in footer after head metadata');
+check($GLOBALS['unlkr_enqueued_scripts']['unlkr-acquisition-touches']['dependencies'] === array(), 'touches producer declares no script dependency (never blocked by a foreign dequeue)');
 ob_start();
 $relay->render_touches_configuration();
 $touches_meta = ob_get_clean();
@@ -301,4 +308,4 @@ $relay->render_touches_configuration();
 $disabled_touches_meta = ob_get_clean();
 check($disabled_touches_meta === '', 'touches feature is silent when explicitly disabled');
 
-echo "OK - 52 assertions\n";
+echo "OK - 53 assertions\n";
