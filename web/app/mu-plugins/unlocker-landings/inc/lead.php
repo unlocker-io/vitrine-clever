@@ -36,7 +36,7 @@ const CRM_VISITOR_HANDLE_PATTERN = '/^av1_[A-Za-z0-9_-]{43}$/';
 const LEAD_SIZE_OPTIONS = ['1–9', '10–24', '25–49', '50–99', '100+'];
 
 /** @var string[] */
-const LEAD_OFFER_OPTIONS = ['split', 'delegation'];
+const LEAD_OFFER_OPTIONS = ['split', 'delegation', 'carte-g-t', 'carte-t'];
 
 /** @var string[] */
 const LEAD_PARCOURS_OPTIONS = ['start', 'demo'];
@@ -375,7 +375,29 @@ function crm_property_count_band(string $size): string
 
 function crm_offer(string $offer): string
 {
-    return $offer === 'delegation' ? 'delegation_g' : 'split';
+    if ($offer === 'delegation' || $offer === 'carte-g-t') {
+        return 'delegation_g';
+    }
+
+    if ($offer === 'carte-t') {
+        return crm_carte_t_offer_value() ?? '';
+    }
+
+    return 'split';
+}
+
+/**
+ * The CRM doesn't accept a `carte-t` offer yet; this reads the value it will
+ * accept the day it does, from an explicit env var, so nothing here needs to
+ * change again at that point. Returns null (not '') when unset or blank --
+ * callers use that null to decide whether to skip the CRM call entirely,
+ * never to send a blank `offer` string.
+ */
+function crm_carte_t_offer_value(): ?string
+{
+    $value = trim((string) getenv('UNLOCKER_LANDING_CRM_OFFER_CARTE_T'));
+
+    return $value !== '' ? $value : null;
 }
 
 /**
@@ -800,6 +822,15 @@ function send_lead_to_crm(int $postId, array $lead): void
         return;
     }
 
+    $offer = (string) ($lead['offer'] ?? '');
+
+    if ($offer === 'carte-t' && crm_carte_t_offer_value() === null) {
+        update_post_meta($postId, '_crm_status', 'skipped_offer_not_mapped');
+        error_log('[unlocker-landings] crm: carte-t lead skipped - UNLOCKER_LANDING_CRM_OFFER_CARTE_T not configured');
+
+        return;
+    }
+
     $submissionId = crm_generate_submission_id();
     update_post_meta($postId, '_crm_submission_id', $submissionId);
 
@@ -958,6 +989,15 @@ function cli_crm_retry(array $args, array $assocArgs): void
 
         $payload = get_post_meta($postId, '_lead_payload', true);
         $lead = is_array($payload) ? $payload : [];
+
+        $offer = (string) ($lead['offer'] ?? '');
+
+        if ($offer === 'carte-t' && crm_carte_t_offer_value() === null) {
+            update_post_meta($postId, '_crm_status', 'skipped_offer_not_mapped');
+            $counts['skipped_offer_not_mapped'] = ($counts['skipped_offer_not_mapped'] ?? 0) + 1;
+
+            continue;
+        }
 
         $submissionId = (string) get_post_meta($postId, '_crm_submission_id', true);
 

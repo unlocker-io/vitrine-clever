@@ -1,11 +1,14 @@
 'use strict';
+function resolveOffer(rawOffer) {
+  return ['delegation', 'carte-g-t', 'carte-t'].indexOf(rawOffer) !== -1 ? rawOffer : 'split';
+}
 function getCampaignContext(search) {
   const params = new URLSearchParams(search);
   const attribution = {};
-  ['utm_source', 'utm_medium', 'utm_campaign', 'utm_content', 'utm_term', 'utm_id', 'fbclid', 'gclid'].forEach(key => {
+  ['utm_source', 'utm_medium', 'utm_campaign', 'utm_content', 'utm_term', 'utm_id', 'fbclid', 'gclid', 'gbraid', 'wbraid'].forEach(key => {
     if (params.has(key)) attribution[key] = params.get(key).slice(0, 200);
   });
-  return { offer: params.get('offre') === 'delegation' ? 'delegation' : 'split', demo: params.get('parcours') === 'demo', attribution };
+  return { offer: resolveOffer(params.get('offre')), demo: params.get('parcours') === 'demo', attribution };
 }
 // Remembers the ISO timestamp of the FIRST arrival on any of the three
 // landing pages for the current browser session, so /demarrer/ can report
