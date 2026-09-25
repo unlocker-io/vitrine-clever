@@ -364,7 +364,30 @@ check('crm_payload: attribution present when granted with UTM', array_key_exists
 check('crm_payload: attribution touch carries utm_source', $grantedWithUtm['attribution']['touches'][0]['utm_source'] === 'meta');
 check('crm_payload: attribution touch carries utm_medium', $grantedWithUtm['attribution']['touches'][0]['utm_medium'] === 'cpc');
 check('crm_payload: attribution touch has no utm_campaign when absent', !array_key_exists('utm_campaign', $grantedWithUtm['attribution']['touches'][0]));
+check('crm_payload: attribution touch has no utm_content when absent', !array_key_exists('utm_content', $grantedWithUtm['attribution']['touches'][0]));
+check('crm_payload: attribution touch has no utm_term when absent', !array_key_exists('utm_term', $grantedWithUtm['attribution']['touches'][0]));
 check('crm_payload: attribution touch occurred_at falls back to $now', $grantedWithUtm['attribution']['touches'][0]['occurred_at'] === $fixedNow);
+
+// -- crm_payload: attribution touch carries utm_content / utm_term ----------
+
+$grantedWithUtmContentTerm = crm_payload(crmLead(['consent_ads' => 'granted', 'utm_source' => '', 'utm_campaign' => '', 'utm_content' => 'banner-a', 'utm_term' => 'ski+chalet']), 'sub-1', 'mountain_split', 'notice-1', $fixedNow);
+check('crm_payload: utm_content alone is enough to trigger attribution', array_key_exists('attribution', $grantedWithUtmContentTerm));
+check('crm_payload: attribution touch carries utm_content', $grantedWithUtmContentTerm['attribution']['touches'][0]['utm_content'] === 'banner-a');
+check('crm_payload: attribution touch carries utm_term', $grantedWithUtmContentTerm['attribution']['touches'][0]['utm_term'] === 'ski+chalet');
+
+$grantedNoUtmContentTerm = crm_payload(crmLead(['consent_ads' => 'granted', 'utm_source' => 'meta', 'utm_campaign' => '', 'utm_content' => '', 'utm_term' => '']), 'sub-1', 'mountain_split', 'notice-1', $fixedNow);
+check('crm_payload: no utm_content key when absent', !array_key_exists('utm_content', $grantedNoUtmContentTerm['attribution']['touches'][0]));
+check('crm_payload: no utm_term key when absent', !array_key_exists('utm_term', $grantedNoUtmContentTerm['attribution']['touches'][0]));
+
+// validate_lead already caps utm_content/utm_term at 200 chars, below crm_attribution's
+// own 256 cap -- so the 256-truncation is only reachable by feeding crm_payload a
+// lead array built by hand, bypassing that earlier cap, exactly like a producer bug would.
+$leadWithLongUtmContentTerm = crmLead(['consent_ads' => 'granted', 'utm_source' => '', 'utm_campaign' => '']);
+$leadWithLongUtmContentTerm['utm_content'] = str_repeat('c', 300);
+$leadWithLongUtmContentTerm['utm_term'] = str_repeat('t', 300);
+$truncatedUtmContentTerm = crm_payload($leadWithLongUtmContentTerm, 'sub-1', 'mountain_split', 'notice-1', $fixedNow);
+check('crm_payload: utm_content is truncated to 256', $truncatedUtmContentTerm['attribution']['touches'][0]['utm_content'] === str_repeat('c', 256));
+check('crm_payload: utm_term is truncated to 256', $truncatedUtmContentTerm['attribution']['touches'][0]['utm_term'] === str_repeat('t', 256));
 
 // attribution: granted but with neither UTM nor click id -> still absent.
 $grantedNoTouchData = crm_payload(crmLead(['consent_ads' => 'granted', 'utm_source' => '', 'utm_campaign' => '', 'fbclid' => '', 'gclid' => '']), 'sub-1', 'mountain_split', 'notice-1', $fixedNow);
@@ -391,7 +414,7 @@ check('crm_payload: no campaign_external_id key when utm_id absent', !array_key_
 // -- crm_payload: no key outside the C1b contract ----------------------------
 
 $fullPayload = crm_payload(
-    crmLead(['consent_ads' => 'granted', 'utm_source' => 'meta', 'utm_medium' => 'cpc', 'utm_campaign' => 'winter', 'utm_id' => 'campaign-42', 'fbclid' => 'abc123', 'gclid' => 'xyz789']),
+    crmLead(['consent_ads' => 'granted', 'utm_source' => 'meta', 'utm_medium' => 'cpc', 'utm_campaign' => 'winter', 'utm_content' => 'banner-a', 'utm_term' => 'ski+chalet', 'utm_id' => 'campaign-42', 'fbclid' => 'abc123', 'gclid' => 'xyz789']),
     'sub-1',
     'mountain_split',
     'notice-1',
@@ -410,8 +433,8 @@ check('crm_payload: business keys match the contract exactly', array_keys($fullP
 $expectedPrivacyKeys = ['notice_version', 'ads_measurement', 'ads_sharing', 'marketing_opt_in'];
 check('crm_payload: privacy keys match the contract exactly', array_keys($fullPayload['privacy']) === $expectedPrivacyKeys);
 
-$expectedTouchKeys = ['occurred_at', 'utm_source', 'utm_medium', 'utm_campaign', 'campaign_external_id', 'click_ids'];
-check('crm_payload: touch keys match the contract exactly (no utm_content/utm_term)', array_keys($fullPayload['attribution']['touches'][0]) === $expectedTouchKeys);
+$expectedTouchKeys = ['occurred_at', 'utm_source', 'utm_medium', 'utm_campaign', 'utm_content', 'utm_term', 'campaign_external_id', 'click_ids'];
+check('crm_payload: touch keys match the contract exactly', array_keys($fullPayload['attribution']['touches'][0]) === $expectedTouchKeys);
 check('crm_payload: campaign_external_id carries utm_id', $fullPayload['attribution']['touches'][0]['campaign_external_id'] === 'campaign-42');
 
 $expectedClickIdKeys = ['fbclid', 'gclid'];
