@@ -35,6 +35,7 @@ if (!function_exists('is_email')) {
 require __DIR__ . '/../web/app/mu-plugins/unlocker-landings/inc/lead.php';
 
 use function Unlocker\Landings\brevo_payload;
+use function Unlocker\Landings\crm_offer;
 use function Unlocker\Landings\crm_payload;
 use function Unlocker\Landings\validate_lead;
 use function Unlocker\Landings\lead_client_ip;
@@ -278,6 +279,53 @@ foreach ($bandExpectations as $size => $expectedBand) {
 // offer mapping.
 check('crm_payload: offer split -> split', crm_payload(crmLead(['offer' => 'split']), 'sub-1', 'mountain_split', 'notice-1', $fixedNow)['offer'] === 'split');
 check('crm_payload: offer delegation -> delegation_g', crm_payload(crmLead(['offer' => 'delegation']), 'sub-1', 'mountain_delegation', 'notice-1', $fixedNow)['offer'] === 'delegation_g');
+
+// -- offer allow-list: the two new Ads offers (carte-g-t, carte-t) -----------
+
+foreach (['split', 'delegation', 'carte-g-t', 'carte-t'] as $offer) {
+    [$errors, $lead] = validate_lead(validSubmission(['offer' => $offer]));
+    check("offer option '{$offer}' is accepted", !isset($errors['offer']) && ($lead['offer'] ?? null) === $offer);
+}
+
+// Regression proof the allow-list is still closed to a 5th, unlisted value.
+[$errors, $lead] = validate_lead(validSubmission(['offer' => 'carte-x']));
+check('offer unlisted value (carte-x): error code', ($errors['offer'] ?? null) === 'invalid_choice');
+check('offer unlisted value (carte-x): not in lead', !isset($lead['offer']));
+
+// crm_offer: carte-g-t maps like delegation; carte-t depends on an explicit
+// env var the CRM doesn't accept yet -- unset means "not mapped".
+check('crm_offer: carte-g-t -> delegation_g', crm_offer('carte-g-t') === 'delegation_g');
+
+putenv('UNLOCKER_LANDING_CRM_OFFER_CARTE_T');
+check('crm_offer: carte-t with env var unset -> empty string', crm_offer('carte-t') === '');
+
+putenv('UNLOCKER_LANDING_CRM_OFFER_CARTE_T=carte_t');
+check('crm_offer: carte-t with env var set -> configured value', crm_offer('carte-t') === 'carte_t');
+putenv('UNLOCKER_LANDING_CRM_OFFER_CARTE_T');
+
+// crm_payload: offer field for the two new offers.
+check(
+    'crm_payload: offer carte-g-t -> delegation_g',
+    crm_payload(crmLead(['offer' => 'carte-g-t']), 'sub-1', 'mountain_delegation', 'notice-1', $fixedNow)['offer'] === 'delegation_g'
+);
+
+putenv('UNLOCKER_LANDING_CRM_OFFER_CARTE_T=carte_t');
+check(
+    'crm_payload: offer carte-t (env var set) -> configured value',
+    crm_payload(crmLead(['offer' => 'carte-t']), 'sub-1', 'mountain_split', 'notice-1', $fixedNow)['offer'] === 'carte_t'
+);
+putenv('UNLOCKER_LANDING_CRM_OFFER_CARTE_T');
+
+// brevo_payload: OFFRE always carries the fine-grained offer, never the CRM
+// mapping -- the explicit proof that Brevo receives the fine-grained offer.
+check(
+    "brevo payload: OFFRE for carte-g-t is 'carte-g-t' (not delegation_g)",
+    brevo_payload(crmLead(['offer' => 'carte-g-t']), 117)['attributes']['OFFRE'] === 'carte-g-t'
+);
+check(
+    "brevo payload: OFFRE for carte-t is 'carte-t'",
+    brevo_payload(crmLead(['offer' => 'carte-t']), 117)['attributes']['OFFRE'] === 'carte-t'
+);
 
 // submission_id passthrough.
 $payload = crm_payload(crmLead(), 'a1b2c3d4-e5f6-4789-a123-456789abcdef', 'mountain_split', 'notice-1', $fixedNow);
