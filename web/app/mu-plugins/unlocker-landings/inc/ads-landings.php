@@ -36,6 +36,12 @@
  * ads_landing_rewrite_full_content()) -- it only does real work for whatever
  * the per-widget filter missed.
  *
+ * Also, page 12723 only: a hero image widget geometrically overlaps its CTA
+ * button at desktop widths and swallows clicks meant for it. Fixed the same
+ * way -- an inline `<style>` printed in <head>, never touching the Elementor
+ * DB content -- see print_ad_landing_cta_overlap_fix() near the bottom of
+ * this file.
+ *
  * @package UnlockerLandings
  */
 
@@ -46,16 +52,27 @@ const AD_LANDING_PAGES = [
         'offer' => 'delegation',
         'ctas' => ['13932f9c', '5901f037', '4ac9dc0b'],
         'calendar_widget' => '10ffe685',
+        'cta_overlap_widget' => null,
     ],
     12231 => [
         'offer' => 'carte-g-t',
         'ctas' => ['02ab38a', 'fadda98', '2c7f661'],
         'calendar_widget' => '5f0ad3d',
+        'cta_overlap_widget' => null,
     ],
     12723 => [
         'offer' => 'carte-t',
         'ctas' => ['7038b1ec'],
         'calendar_widget' => null,
+        // Measured in prod (25/09): the hero mockup image widget's own
+        // `.elementor-widget-container` carries a `margin-top:-60px` (see
+        // uploads/elementor/css/post-12723.css) that pulls its rendered box
+        // -- not just the <img> inside it -- over the CTA button
+        // (elementor-element-7038b1ec) sitting right above it in the DOM, at
+        // desktop widths (measured 1280x900 and 1920x1080; the mobile layout
+        // stacks them without overlap). See print_ad_landing_cta_overlap_fix()
+        // below.
+        'cta_overlap_widget' => '745598c0',
     ],
 ];
 
@@ -358,3 +375,65 @@ add_filter('script_loader_tag', function (string $tag, string $handle): string {
 
     return $tag;
 }, 10, 2);
+
+/**
+ * Pure (no WordPress call): the inline `<style>` block that neutralizes
+ * pointer events on a decorative widget overlapping a CTA, scoped to a single
+ * page via the `page-id-{$pageId}` class WordPress always prints on <body>.
+ *
+ * Scoping by page id (rather than emitting a bare `.elementor-element-xxx`
+ * rule) means this can never affect another page even in the (very unlikely)
+ * event Elementor ever reused the same short widget id elsewhere.
+ *
+ * `pointer-events: none` -- rather than a `position`/`z-index` fix on the
+ * button -- was chosen because the overlapping widget is a purely decorative
+ * image (`alt=""`, not a link or anything else interactive): it has nothing
+ * to lose by stopping receiving pointer events, whereas repositioning the
+ * button risks the button and image nudging each other or reflowing
+ * differently than the design at some viewport this fix isn't scoped to
+ * check.
+ */
+function ad_landing_cta_overlap_fix_css(int $pageId, string $widgetId): string
+{
+    return '<style>.page-id-' . $pageId . ' .elementor-element-' . $widgetId . '{pointer-events:none}</style>' . "\n";
+}
+
+add_action('wp_head', __NAMESPACE__ . '\\print_ad_landing_cta_overlap_fix');
+
+/**
+ * Measured in prod (25/09) on page 12723 (/carte-t/) only: the hero mockup
+ * image widget's own `.elementor-widget-container` (not just the <img>
+ * inside it, see the `cta_overlap_widget` comment on AD_LANDING_PAGES above)
+ * geometrically overlaps the "M'inscrire sur Unlocker" CTA button at desktop
+ * widths, and -- despite the button being visually on top in the design --
+ * is what `document.elementFromPoint()` and a real mouse click at the
+ * button's location actually hit, silently swallowing the click. Mobile is
+ * unaffected (the two widgets stack without overlapping) and isn't touched.
+ *
+ * Emits the CSS directly in `<head>` (like print_fallback_seo_tags() in
+ * seo.php and print_font_preloads() just above in assets.php) rather than via
+ * wp_add_inline_style() on an enqueued handle: these three Elementor pages
+ * are plain DB content, not one of this plugin's own page templates, so they
+ * never go through enqueue_landing_assets() / dequeue_foreign_assets() (both
+ * gated on get_landing_template(), which is null here) -- there is no
+ * `unlocker-landings` stylesheet enqueued on this request to attach to.
+ *
+ * The Elementor DB content itself is never touched, same principle as the
+ * href rewriting above: this only ever changes what's printed in <head>.
+ */
+function print_ad_landing_cta_overlap_fix(): void
+{
+    $pageId = get_queried_object_id();
+
+    if (!isset(AD_LANDING_PAGES[$pageId]) || !is_page($pageId)) {
+        return;
+    }
+
+    $widgetId = AD_LANDING_PAGES[$pageId]['cta_overlap_widget'] ?? null;
+
+    if ($widgetId === null) {
+        return;
+    }
+
+    echo ad_landing_cta_overlap_fix_css($pageId, $widgetId);
+}
