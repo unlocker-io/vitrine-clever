@@ -277,7 +277,9 @@ function brevo_payload(array $lead, int $listId): array
 /**
  * Maps a validated lead to a CRM `POST /api/v1/acquisition/requests` body
  * (contract C1b). Only the keys the contract admits are ever emitted: no
- * `utm_content`/`utm_term`, no extra field on `contact`/`business`/`privacy`.
+ * extra field on `contact`/`business`/`privacy`. `attribution.touches.*` may
+ * carry `utm_content`/`utm_term` in addition to `utm_source`/`utm_medium`/
+ * `utm_campaign`/`campaign_external_id`/`click_ids`.
  *
  * @param array<string, string> $lead
  */
@@ -417,12 +419,14 @@ function crm_attribution(array $lead, string $consentAds, string $now): ?array
     $utmSource = crm_truncate((string) ($lead['utm_source'] ?? ''), 256);
     $utmMedium = crm_truncate((string) ($lead['utm_medium'] ?? ''), 256);
     $utmCampaign = crm_truncate((string) ($lead['utm_campaign'] ?? ''), 256);
+    $utmContent = crm_truncate((string) ($lead['utm_content'] ?? ''), 256);
+    $utmTerm = crm_truncate((string) ($lead['utm_term'] ?? ''), 256);
     // utm_id is the ad platform's own campaign id -- reported as
     // campaign_external_id, never sent to Brevo.
     $campaignExternalId = crm_truncate((string) ($lead['utm_id'] ?? ''), 120);
     $clickIds = crm_click_ids($lead);
 
-    if ($utmSource === '' && $utmMedium === '' && $utmCampaign === '' && $campaignExternalId === '' && $clickIds === []) {
+    if ($utmSource === '' && $utmMedium === '' && $utmCampaign === '' && $utmContent === '' && $utmTerm === '' && $campaignExternalId === '' && $clickIds === []) {
         return null;
     }
 
@@ -438,6 +442,14 @@ function crm_attribution(array $lead, string $consentAds, string $now): ?array
 
     if ($utmCampaign !== '') {
         $touch['utm_campaign'] = $utmCampaign;
+    }
+
+    if ($utmContent !== '') {
+        $touch['utm_content'] = $utmContent;
+    }
+
+    if ($utmTerm !== '') {
+        $touch['utm_term'] = $utmTerm;
     }
 
     if ($campaignExternalId !== '') {
