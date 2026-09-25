@@ -55,7 +55,7 @@ function response($code) { return array('response' => array('code' => $code)); }
 function body_at($request_index) { return json_decode($GLOBALS['unlkr_http_requests'][$request_index][1]['body'], true); }
 function last_body() { return body_at(count($GLOBALS['unlkr_http_requests']) - 1); }
 function env_reset() {
-    foreach (array('CRM_ACQUISITION_RELAY_ENABLED', 'CRM_ACQUISITION_API_URL', 'CRM_ACQUISITION_ALLOWED_HOSTS', 'CRM_ACQUISITION_SERVICE_TOKEN', 'CRM_ACQUISITION_METFORM_FORM_ID', 'CRM_ACQUISITION_LANDING_KEY', 'CRM_ACQUISITION_PRIVACY_NOTICE_VERSION', 'CRM_ACQUISITION_CONSENT_GATE_CONFIRMED', 'CRM_ACQUISITION_ATTEMPT_RETENTION_DAYS', 'CRM_ACQUISITION_FIELD_EMAIL', 'CRM_ACQUISITION_FIELD_NAME', 'CRM_ACQUISITION_FIELD_PHONE', 'CRM_ACQUISITION_FIELD_BUSINESS_NAME', 'CRM_ACQUISITION_FIELD_COUNTRY', 'CRM_ACQUISITION_FIELD_AREA', 'CRM_ACQUISITION_FIELD_PROPERTY_COUNT_BAND', 'CRM_ACQUISITION_FIELD_OFFER', 'CRM_ACQUISITION_FIELD_ADS_MEASUREMENT', 'CRM_ACQUISITION_FIELD_ADS_SHARING', 'CRM_ACQUISITION_FIELD_MARKETING_OPT_IN', 'CRM_ACQUISITION_FIELD_ATTEMPT_TOKEN', 'CRM_ACQUISITION_CONTINUITY_ENABLED', 'CRM_ACQUISITION_WEB_PREFERENCES_URL', 'CRM_ACQUISITION_WEB_ALLOWED_HOSTS', 'CRM_ACQUISITION_SITE_KEY', 'CRM_ACQUISITION_CONTINUITY_NOTICE_VERSION', 'CRM_ACQUISITION_CONTINUITY_APP_ORIGINS', 'CRM_ACQUISITION_CONTINUITY_TTL_SECONDS', 'CRM_ACQUISITION_CONTINUITY_TIMEOUT_MS', 'CRM_ACQUISITION_CONTINUITY_RETRIES', 'CRM_ACQUISITION_TOUCHES_ENABLED', 'CRM_ACQUISITION_WEB_TOUCHES_URL', 'CRM_ACQUISITION_TOUCHES_NOTICE_VERSION', 'CRM_ACQUISITION_TOUCHES_LANDING_KEY', 'CRM_ACQUISITION_TOUCHES_TTL_SECONDS', 'CRM_ACQUISITION_TOUCHES_TIMEOUT_MS', 'CRM_ACQUISITION_TOUCHES_RETRIES') as $key) { putenv($key); }
+    foreach (array('CRM_ACQUISITION_RELAY_ENABLED', 'CRM_ACQUISITION_API_URL', 'CRM_ACQUISITION_ALLOWED_HOSTS', 'CRM_ACQUISITION_SERVICE_TOKEN', 'CRM_ACQUISITION_METFORM_FORM_ID', 'CRM_ACQUISITION_LANDING_KEY', 'CRM_ACQUISITION_PRIVACY_NOTICE_VERSION', 'CRM_ACQUISITION_CONSENT_GATE_CONFIRMED', 'CRM_ACQUISITION_ATTEMPT_RETENTION_DAYS', 'CRM_ACQUISITION_FIELD_EMAIL', 'CRM_ACQUISITION_FIELD_NAME', 'CRM_ACQUISITION_FIELD_PHONE', 'CRM_ACQUISITION_FIELD_BUSINESS_NAME', 'CRM_ACQUISITION_FIELD_COUNTRY', 'CRM_ACQUISITION_FIELD_AREA', 'CRM_ACQUISITION_FIELD_PROPERTY_COUNT_BAND', 'CRM_ACQUISITION_FIELD_OFFER', 'CRM_ACQUISITION_FIELD_ADS_MEASUREMENT', 'CRM_ACQUISITION_FIELD_ADS_SHARING', 'CRM_ACQUISITION_FIELD_MARKETING_OPT_IN', 'CRM_ACQUISITION_FIELD_ATTEMPT_TOKEN', 'CRM_ACQUISITION_CONTINUITY_ENABLED', 'CRM_ACQUISITION_WEB_PREFERENCES_URL', 'CRM_ACQUISITION_WEB_ALLOWED_HOSTS', 'CRM_ACQUISITION_SITE_KEY', 'CRM_ACQUISITION_CONTINUITY_NOTICE_VERSION', 'CRM_ACQUISITION_CONTINUITY_APP_ORIGINS', 'CRM_ACQUISITION_CONTINUITY_TTL_SECONDS', 'CRM_ACQUISITION_CONTINUITY_TIMEOUT_MS', 'CRM_ACQUISITION_CONTINUITY_RETRIES', 'CRM_ACQUISITION_TOUCHES_ENABLED', 'CRM_ACQUISITION_WEB_TOUCHES_URL', 'CRM_ACQUISITION_TOUCHES_NOTICE_VERSION', 'CRM_ACQUISITION_TOUCHES_LANDING_KEY', 'CRM_ACQUISITION_TOUCHES_TTL_SECONDS', 'CRM_ACQUISITION_TOUCHES_TIMEOUT_MS', 'CRM_ACQUISITION_TOUCHES_RETRIES', 'CRM_ACQUISITION_TOUCHES_LINK_DECORATOR_ENABLED', 'CRM_ACQUISITION_TOUCHES_LINK_DECORATOR_APP_ORIGINS') as $key) { putenv($key); }
 }
 function configure() {
     env_reset();
@@ -308,4 +308,43 @@ $relay->render_touches_configuration();
 $disabled_touches_meta = ob_get_clean();
 check($disabled_touches_meta === '', 'touches feature is silent when explicitly disabled');
 
-echo "OK - 53 assertions\n";
+// UNL-4643, amendment 4: link decorator (sub-feature of the touches producer).
+configure_touches();
+$link_decorator_default = $relay->touches_configuration();
+check($link_decorator_default['link_decorator_active'] === true, 'link decorator defaults to active when touches is enabled and no override is set');
+check($link_decorator_default['link_decorator_app_origins'] === array('https://app.unlocker.io'), 'link decorator defaults its app origin allowlist to https://app.unlocker.io alone');
+check($link_decorator_default['valid'] === true, 'a default (unset) link decorator configuration never fails the touches producer itself');
+
+configure_touches();
+putenv('CRM_ACQUISITION_TOUCHES_LINK_DECORATOR_ENABLED=0');
+$link_decorator_disabled = $relay->touches_configuration();
+check($link_decorator_disabled['link_decorator_active'] === false, 'link decorator can be explicitly disabled independently of the touches producer');
+check($link_decorator_disabled['link_decorator_app_origins'] === array(), 'a disabled link decorator carries no app origin in its resolved configuration');
+check($link_decorator_disabled['valid'] === true, 'disabling only the link decorator never fails the touches producer itself');
+
+configure_touches();
+putenv('CRM_ACQUISITION_TOUCHES_LINK_DECORATOR_APP_ORIGINS=https://app.unlocker.io/some-path');
+$link_decorator_invalid_origin = $relay->touches_configuration();
+check($link_decorator_invalid_origin['link_decorator_active'] === false, 'an app origin carrying a path fails the link decorator closed, not the touches producer');
+check($link_decorator_invalid_origin['valid'] === true, 'an invalid link decorator app origin never fails the touches producer itself');
+
+configure_touches();
+putenv('CRM_ACQUISITION_TOUCHES_LINK_DECORATOR_APP_ORIGINS=https://app.unlocker.io,https://staging.example.test');
+$link_decorator_multi = $relay->touches_configuration();
+check($link_decorator_multi['link_decorator_active'] === true && $link_decorator_multi['link_decorator_app_origins'] === array('https://app.unlocker.io', 'https://staging.example.test'), 'the app origin allowlist accepts several exact HTTPS origins, no wildcard support anywhere');
+
+configure_touches();
+ob_start();
+$relay->render_touches_configuration();
+$touches_meta_with_decorator = ob_get_clean();
+check(strpos($touches_meta_with_decorator, 'data-link-decorator-enabled="1"') !== false, 'public touches metadata reflects the link decorator active flag');
+check(strpos($touches_meta_with_decorator, 'data-link-decorator-app-origins="https://app.unlocker.io"') !== false, 'public touches metadata carries the resolved app origin allowlist');
+
+configure_touches();
+putenv('CRM_ACQUISITION_TOUCHES_LINK_DECORATOR_ENABLED=0');
+ob_start();
+$relay->render_touches_configuration();
+$touches_meta_decorator_off = ob_get_clean();
+check(strpos($touches_meta_decorator_off, 'data-link-decorator-enabled="0"') !== false && strpos($touches_meta_decorator_off, 'data-link-decorator-app-origins=""') !== false, 'public touches metadata carries an empty allowlist and enabled="0" once the decorator is disabled');
+
+echo "OK - 65 assertions\n";

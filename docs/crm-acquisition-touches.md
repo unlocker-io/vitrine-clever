@@ -176,6 +176,74 @@ d’un merge ou d’un déploiement de ce code. Merger cette PR ne doit activer 
 que cet interrupteur n’a pas été positionné à la main, après vérification du registre CRM
 (`landing_key` et origine du site).
 
+## Amendement 4 (UNL-4643) : décorateur de lien de continuité par fragment
+
+Spec complète : `sacred-book/developers/platform/unlocker-internal/specs/2026-09-25--UNL-4643--crm-acquisition-amendement-4-continuite-fragment.md`.
+
+Le handshake `postMessage` de C2d (ci-dessus, `docs/crm-acquisition-continuity.md`) suppose
+un `window.opener` : mesuré en prod le 25/09, tous les liens du site vers l'app s'ouvrent dans
+le **même onglet**, avec `rel="noreferrer"` — l'app n'a donc jamais de `window.opener`, et le
+handshake n'aboutit jamais (0 lien d'identité). L'amendement 4 ajoute un second mécanisme, qui
+prévaut désormais sur le `postMessage` : au clic sur un lien vers l'app, le site ajoute
+directement le couple dans le fragment de l'URL de navigation.
+
+**Pourquoi dans ce fichier plutôt que dans celui de C2d.** Ce décorateur vit dans
+`unlkr-acquisition-touches.js` — actif en prod, sans dépendre de l'activation de C2d (qui reste
+`false` en prod aujourd'hui) — et non dans un nouveau fichier : c'est le seul producteur déjà
+chargé partout où un lien vers l'app peut apparaître, et il expose déjà `readHandle()`, le
+mécanisme de consentement CookieYes et les formats `av1_…`/`acr1_…` que le décorateur réutilise
+tels quels.
+
+**Comportement.** Une délégation d'événement `click` **et** `auxclick` (clic milieu, ouverture
+en nouvel onglet) en phase de capture sur `document` — jamais une réécriture du DOM au
+chargement, ce qui couvre aussi un lien injecté tardivement dans la page. Au clic, si le lien
+résolu (`event.target.closest('a[href]')`) a pour origine **exactement** une entrée de la liste
+configurée (égalité stricte, aucun joker, aucune correspondance par préfixe/suffixe — c'est le
+point que la suite de tests mute pour le prouver), le producteur :
+
+1. relit le consentement courant via `getCkyConsent()` (même mécanisme que le reste de ce
+   fichier) — sans couple validé, rien ne change ;
+2. cherche un couple `visitor_handle`/`consent_receipt` valide et non expiré, d'abord dans son
+   propre magasin C2c (`readHandle()`, `unlkr_acquisition_touches_handle_v1_<site_key>`), puis,
+   à défaut, dans le magasin C2d (`unlkr_acquisition_continuity_v1_<site_key>`) — lu, jamais
+   consommé ni supprimé ici : la consommation unique de C2d reste le rôle exclusif de son propre
+   handshake `postMessage` ;
+3. ajoute `ul_ch=<visitor_handle>.<consent_receipt>` au fragment de l'URL, en remplaçant une
+   entrée `ul_ch` déjà présente et en conservant toutes les autres. `rel="noreferrer"` n'empêche
+   pas cette opération : un fragment reste dans l'URL de navigation, il n'est jamais envoyé au
+   serveur ni au `Referer`. Les autres attributs de l'ancre (`rel`, `target`, …) ne sont jamais
+   modifiés.
+
+Sans consentement, sans couple valide, ou pour toute autre origine, le lien reste
+**byte-identique**.
+
+**Configuration** (sous-clé de la configuration touches ci-dessus, silencieuse si la valeur est
+absente ou hors borne) :
+
+```text
+CRM_ACQUISITION_TOUCHES_LINK_DECORATOR_ENABLED=true
+CRM_ACQUISITION_TOUCHES_LINK_DECORATOR_APP_ORIGINS=https://app.unlocker.io
+```
+
+`LINK_DECORATOR_ENABLED` est **actif par défaut dès que le producteur touches lui-même est
+actif et valide** (absence de variable ⇒ `true`) ; le mettre à `0`/`false` désactive uniquement
+le décorateur, sans toucher au reste du producteur. `LINK_DECORATOR_APP_ORIGINS` est une liste
+explicite d'origines HTTPS exactes séparées par des virgules (défaut `https://app.unlocker.io`
+si absente) — jamais de joker, comparaison par égalité stricte uniquement. Une entrée non
+canonique (chemin, query, fragment, identifiants, scéma non HTTPS) invalide la liste entière et
+désactive uniquement le décorateur ; la configuration touches globale (mint de handle, envoi des
+touches) n'est jamais affectée par une configuration de décorateur absente ou invalide.
+
+**Liens concernés sur ce site** (mesurés le 25/09 sur `unlocker.io/`, `/carte-t/` et
+`/demarrer/?offre=carte-t&parcours=demo`) : le header Elementor (« Connexion » /
+« S'inscrire », `href="https://app.unlocker.io/login?"` / `.../register?"`, contenu en base
+Elementor, hors de ce dépôt), les CTA des pages Ads (`inc/ads-landings.php`, réécrits vers
+`/demarrer/` par un Product decision antérieur — ils ne pointent donc plus vers l'app), et le
+bouton de succès `/demarrer/` (`templates/template-demarrer.php`,
+`href="https://app.unlocker.io/register" rel="noreferrer"`). Le décorateur ne fait aucune
+hypothèse sur la structure de ces pages : il ne dépend que de l'origine du lien au moment du
+clic.
+
 ## Gates avant PR
 
 ```bash
@@ -186,6 +254,7 @@ rtk docker run --rm -v "$(pwd)":/app -w /app php:8.3-cli php tests/unlkr-acquisi
 Aucun local PHP n’est installé sur ce VPS : le harnais PHP se vérifie uniquement via Docker,
 comme documenté ci-dessus. Le harnais DOM et le test de contrat CRM tournent avec le runtime
 Node déclaré dans `package.json` (`Node >=20 <25`) : `rtk npm test` exécute `test:relay-dom`,
-`test:continuity-dom`, `test:touches-dom` et `test:touches-contract`. Le dépôt ne contient
+`test:continuity-dom`, `test:touches-dom`, `test:touches-contract` et `test:link-decorator-dom`
+(amendement 4, UNL-4643), entre autres suites DOM du dépôt. Le dépôt ne contient
 actuellement aucun workflow CI : tant qu’un runner n’automatise pas ces deux commandes, leurs
 résultats doivent être consignés manuellement dans la PR.

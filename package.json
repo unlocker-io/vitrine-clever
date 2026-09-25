@@ -9,8 +9,9 @@
     "test:continuity-dom": "node tests/unlkr-acquisition-continuity-dom.test.js",
     "test:touches-dom": "node tests/unlkr-acquisition-touches-dom.test.js",
     "test:touches-contract": "node tests/unlkr-acquisition-touches-contract.test.js",
+    "test:link-decorator-dom": "node tests/unlkr-acquisition-link-decorator-dom.test.js",
     "test:flow-offer": "node tests/unlocker-flow-offer-dom.test.js",
     "test:ads-landing-query": "node tests/unlocker-ads-landing-query-dom.test.js",
-    "test": "npm run test:relay-dom && npm run test:continuity-dom && npm run test:touches-dom && npm run test:touches-contract && npm run test:flow-offer && npm run test:ads-landing-query"
+    "test": "npm run test:relay-dom && npm run test:continuity-dom && npm run test:touches-dom && npm run test:touches-contract && npm run test:link-decorator-dom && npm run test:flow-offer && npm run test:ads-landing-query"
   }
 }
