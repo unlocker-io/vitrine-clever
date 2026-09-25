@@ -20,6 +20,22 @@
  * own explicit allow-list). Never match by button label text: labels use
  * curly/straight apostrophes inconsistently and are not a stable target.
  *
+ * Measured in prod (25/09): that per-widget filter is NOT a reliable enough
+ * hook on its own -- a widget can reach the browser without ever having gone
+ * through a fresh `render_content()` call this request (Elementor's element
+ * cache, an intermediary cache, or anything else able to serve a widget's
+ * markup older than the PHP that's supposed to produce it), and when that
+ * happens the filter above is simply never called for it, silently. So this
+ * file ALSO wraps the full, already-rendered page in an output buffer (see
+ * start_ad_landing_output_buffer(), on `template_redirect`) and re-applies
+ * the exact same rewriting rules to whatever HTML actually reached the
+ * response, by locating each target widget's `data-id` in that string. Both
+ * mechanisms are kept: the per-widget filter still runs first on a normal
+ * render, and the full-page pass is a no-op on top of it (see the
+ * idempotence note on ads_landing_rewrite_button_href() and
+ * ads_landing_rewrite_full_content()) -- it only does real work for whatever
+ * the per-widget filter missed.
+ *
  * @package UnlockerLandings
  */
 
@@ -63,6 +79,18 @@ const AD_LANDING_CTA_MARKER = 'data-ul-ads-cta';
  */
 function ads_landing_rewrite_button_href(string $content, string $newHref, string $widgetIdForLogging): string
 {
+    // Idempotent: a block that already carries the marker was already
+    // rewritten -- either by this same filter on a fresh render, or by a
+    // previous pass of the full-page cache-bypass rewrite further down this
+    // file. Re-matching the <a> tag and replacing its (already correct) href
+    // again would be harmless, but re-appending the marker attribute a
+    // second time would NOT be: it would leave two `data-ul-ads-cta="1"`
+    // attributes on the same tag. Bailing out here keeps repeated
+    // applications byte-for-byte identical.
+    if (strpos($content, AD_LANDING_CTA_MARKER . '="1"') !== false) {
+        return $content;
+    }
+
     if (!preg_match('/<a\b[^>]*>/i', $content, $tagMatch, PREG_OFFSET_CAPTURE)) {
         error_log("ads-landings: no <a> tag found in widget {$widgetIdForLogging}, content left unchanged");
 
@@ -138,6 +166,164 @@ function filter_ad_landing_widget_content(string $content, $widget): string
     }
 
     return $content;
+}
+
+/**
+ * Pure (no WordPress call): given the FULL rendered page HTML and a widget
+ * id, returns the byte offset and length of that widget's inner content --
+ * the same slice `elementor/widget/render_content` hands to the filter above
+ * -- i.e. everything inside its `.elementor-widget-container` wrapper div,
+ * balanced against nested `<div>`/`</div>` tags so a widget with its own
+ * nested markup (the button's `.elementor-button-wrapper`, the calendar's
+ * `.elementor-shortcode`) is never truncated mid-element.
+ *
+ * Returns null -- callers must leave $html untouched in that case -- when
+ * the widget id, or a `.elementor-widget-container` after it, isn't found
+ * (widget absent from this render) or when the `<div>`/`</div>` tags never
+ * balance (unexpected markup shape): never risk corrupting unrelated markup
+ * on a shape this plugin wasn't written against.
+ */
+function ads_landing_locate_widget_inner_html(string $html, string $widgetId): ?array
+{
+    $idPos = strpos($html, 'data-id="' . $widgetId . '"');
+
+    if ($idPos === false) {
+        return null;
+    }
+
+    $containerTag = '<div class="elementor-widget-container">';
+    $containerPos = strpos($html, $containerTag, $idPos);
+
+    if ($containerPos === false) {
+        return null;
+    }
+
+    $innerStart = $containerPos + strlen($containerTag);
+    $cursor = $innerStart;
+    $depth = 1;
+
+    while ($depth > 0) {
+        $nextOpen = strpos($html, '<div', $cursor);
+        $nextClose = strpos($html, '</div>', $cursor);
+
+        if ($nextClose === false) {
+            // Unbalanced markup: bail out rather than guess.
+            return null;
+        }
+
+        if ($nextOpen !== false && $nextOpen < $nextClose) {
+            $depth++;
+            $cursor = $nextOpen + 4;
+        } else {
+            $depth--;
+            $cursor = $nextClose + 6;
+        }
+    }
+
+    $innerEnd = $cursor - 6; // Back up to just before the matching </div>.
+
+    return [$innerStart, $innerEnd - $innerStart];
+}
+
+/**
+ * Pure (no WordPress call): applies the exact same rewriting rules as
+ * filter_ad_landing_widget_content() above, but to the page's FULL
+ * already-rendered HTML rather than to a single widget's content as
+ * Elementor hands it to the `elementor/widget/render_content` filter.
+ *
+ * This is the cache-proof path: whatever mechanism served a widget's markup
+ * unrendered by that filter on this request, the bytes that actually reached
+ * the browser still carry each target widget's `data-id`, so locating and
+ * rewriting THAT string closes the gap regardless of the reason it opened.
+ *
+ * Idempotent: re-running it on HTML the per-widget filter (or a previous
+ * pass of this same function) already fixed is a no-op byte-for-byte --
+ * ads_landing_rewrite_button_href() bails out on a block that already
+ * carries the marker attribute, and ads_landing_calendar_button_html()
+ * produces byte-identical output for the same $config every time, so
+ * replacing an already-correct block with it changes nothing.
+ */
+function ads_landing_rewrite_full_content(string $html, array $config): string
+{
+    $targetUrl = demarrer_url('offre=' . rawurlencode($config['offer']) . '&parcours=demo');
+
+    foreach ($config['ctas'] as $widgetId) {
+        $location = ads_landing_locate_widget_inner_html($html, $widgetId);
+
+        if ($location === null) {
+            continue;
+        }
+
+        [$offset, $length] = $location;
+        $inner = substr($html, $offset, $length);
+        $rewritten = ads_landing_rewrite_button_href($inner, $targetUrl, $widgetId);
+
+        if ($rewritten !== $inner) {
+            $html = substr_replace($html, $rewritten, $offset, $length);
+        }
+    }
+
+    if ($config['calendar_widget'] !== null) {
+        $location = ads_landing_locate_widget_inner_html($html, $config['calendar_widget']);
+
+        if ($location !== null) {
+            [$offset, $length] = $location;
+            $inner = substr($html, $offset, $length);
+            $newInner = ads_landing_calendar_button_html($targetUrl);
+
+            if ($inner !== $newInner) {
+                $html = substr_replace($html, $newInner, $offset, $length);
+            }
+        }
+    }
+
+    return $html;
+}
+
+/**
+ * Same page-id guard as the widget filter above. Returns the callback to
+ * hand to ob_start() for the current request, or null when the current page
+ * isn't one of the three ad landings -- kept separate from ob_start() itself
+ * (see start_ad_landing_output_buffer() below) so the decision of WHICH
+ * pages get buffered, and WHAT the buffer callback does, can be tested
+ * without touching real output buffering.
+ *
+ * The widget-id scoping that protects the shared header's
+ * Connexion/S'inscrire buttons happens inside ads_landing_rewrite_full_content()
+ * itself, which only ever searches for the current page's own configured
+ * widget ids -- never the header's.
+ */
+function ads_landing_output_buffer_callback_for_current_request(): ?callable
+{
+    $pageId = get_queried_object_id();
+
+    if (!isset(AD_LANDING_PAGES[$pageId]) || !is_page($pageId)) {
+        return null;
+    }
+
+    $config = AD_LANDING_PAGES[$pageId];
+
+    return function (string $html) use ($config): string {
+        return ads_landing_rewrite_full_content($html, $config);
+    };
+}
+
+add_action('template_redirect', __NAMESPACE__ . '\\start_ad_landing_output_buffer', 0);
+
+/**
+ * Cache-proof counterpart to filter_ad_landing_widget_content(): starts an
+ * output buffer over the ENTIRE response for the three ad landing pages,
+ * rewritten on flush by ads_landing_rewrite_full_content(). Registered on
+ * `template_redirect` (before the theme's template file runs) so it wraps
+ * everything the page prints, whatever produced it.
+ */
+function start_ad_landing_output_buffer(): void
+{
+    $callback = ads_landing_output_buffer_callback_for_current_request();
+
+    if ($callback !== null) {
+        ob_start($callback);
+    }
 }
 
 add_action('wp_enqueue_scripts', __NAMESPACE__ . '\\enqueue_ad_landing_query_script');
