@@ -90,4 +90,14 @@ function checked(condition, label) {
   checked(url.searchParams.get('gclid') === 'xyz', 'gclid still propagates alongside the offre/parcours guard');
 }
 
+// -- from=<slug> (added server-side) survives tracked-param propagation ----
+
+{
+  const cta = anchor('https://unlocker.io/demarrer/?offre=carte-t&parcours=demo&from=carte-t', true);
+  run('?gclid=abc123&utm_source=meta', [cta]);
+  const url = new URL(cta.href);
+  checked(url.searchParams.get('from') === 'carte-t', 'from=<slug> set server-side survives tracked-param propagation untouched');
+  checked(url.searchParams.get('gclid') === 'abc123', 'gclid still propagates alongside from');
+}
+
 console.log(`OK - ${assertions} DOM assertions`);

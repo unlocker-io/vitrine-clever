@@ -8,7 +8,49 @@ function getCampaignContext(search) {
   ['utm_source', 'utm_medium', 'utm_campaign', 'utm_content', 'utm_term', 'utm_id', 'fbclid', 'gclid', 'gbraid', 'wbraid'].forEach(key => {
     if (params.has(key)) attribution[key] = params.get(key).slice(0, 200);
   });
-  return { offer: resolveOffer(params.get('offre')), demo: params.get('parcours') === 'demo', attribution };
+  return { offer: resolveOffer(params.get('offre')), demo: params.get('parcours') === 'demo', from: params.get('from'), attribution };
+}
+// Resolves the "← Retour à l'offre" link with 3 falling priorities: an
+// explicit `from=<slug>` query param (only when it's one of the slugs the
+// server whitelisted in config.fromSlugs -- never a free-form URL, which
+// would be an open redirect), then a same-origin referrer whose path
+// matches one of those same slugs, then a static default keyed by the
+// resolved offer (config.offerFallback). Pure: referrer and origin are
+// passed in explicitly rather than read from document/window directly.
+// Returns null -- callers must then leave the SSR default href (the split
+// landing) alone -- only when none of the three resolves, which in practice
+// only happens on a misconfigured page (fromSlugs/offerFallback missing).
+function resolveBackHref(config, campaign, referrer, origin) {
+  const fromSlugs = (config && config.fromSlugs) || {};
+
+  if (
+    campaign.from
+    && Object.prototype.hasOwnProperty.call(fromSlugs, campaign.from)
+    && typeof fromSlugs[campaign.from] === 'string'
+  ) {
+    return fromSlugs[campaign.from];
+  }
+
+  if (referrer) {
+    try {
+      const referrerUrl = new URL(referrer);
+      if (referrerUrl.origin === origin) {
+        const path = referrerUrl.pathname.replace(/^\/+|\/+$/g, '');
+        if (
+          Object.prototype.hasOwnProperty.call(fromSlugs, path)
+          && typeof fromSlugs[path] === 'string'
+        ) {
+          return fromSlugs[path];
+        }
+      }
+    } catch (e) {
+      // Malformed referrer: fall through to the offer fallback below.
+    }
+  }
+
+  const offerFallback = (config && config.offerFallback) || {};
+
+  return typeof offerFallback[campaign.offer] === 'string' ? offerFallback[campaign.offer] : null;
 }
 // Remembers the ISO timestamp of the FIRST arrival on any of the three
 // landing pages for the current browser session, so /demarrer/ can report
@@ -98,7 +140,7 @@ if (typeof document !== 'undefined') {
     document.querySelectorAll('[data-ul-offer]').forEach(node => { node.textContent = label; });
     const backLink = document.querySelector('#ul-back');
     if (backLink) {
-      const backHref = delegation ? config.delegation : config.split;
+      const backHref = resolveBackHref(config, campaign, document.referrer, window.location.origin);
       if (backHref) backLink.href = backHref;
     }
     document.querySelector('#ul-intent').textContent = campaign.demo ? 'Un échange pour poser les bonnes bases.' : 'Votre prochaine saison commence ici.';
