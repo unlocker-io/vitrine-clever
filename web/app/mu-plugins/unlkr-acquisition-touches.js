@@ -34,6 +34,139 @@
         return;
     }
 
+    // UNL-4643, amendment 4: link decorator sub-configuration. Governed by the
+    // same activation gate as the rest of this producer (the meta above),
+    // plus its own sub-flag (see the wiring block further down).
+    var linkDecoratorEnabled = meta.getAttribute('data-link-decorator-enabled') === '1';
+    var linkDecoratorAppOrigins = String(meta.getAttribute('data-link-decorator-app-origins') || '').split(',').filter(Boolean);
+    // C2d's own single-use store (docs/crm-acquisition-continuity.md); read
+    // here only as a fallback source, never cleared or consumed by this file.
+    var continuityStorageKey = 'unlkr_acquisition_continuity_v1_' + siteKey;
+
+    // -- UNL-4643, amendment 4: fragment continuity link decorator ----------
+    //
+    // Wired up here, BEFORE the "no recognized campaign signal" early return
+    // below: unlike touch delivery, the decorator has nothing to do with
+    // whether THIS page carries UTM/click-id parameters -- it must keep
+    // working on a plain page visit as long as a couple is already sitting in
+    // storage from an earlier landing this session. It never depends on
+    // consentState/applyConsent either (those are wired further down, and
+    // skipped entirely by that same early return): consent is instead
+    // re-checked synchronously at click time via the exact getCkyConsent()
+    // recovery mechanism already used elsewhere in this file. Reads C2c's own
+    // handle/receipt first (readHandle(), defined below -- safe to call here
+    // thanks to function hoisting, since it only ever runs later, on a real
+    // click), then falls back to C2d's continuity store if C2c has none.
+    function readContinuityCouple() {
+        var browserStorage = storage();
+        if (!browserStorage) {
+            return null;
+        }
+        try {
+            var record = JSON.parse(browserStorage.getItem(continuityStorageKey));
+            if (record && record.v === 1 && typeof record.expires_at === 'number' && record.expires_at > Date.now()
+                && record.payload && record.payload.schema_version === 1 && record.payload.site_key === siteKey
+                && handlePattern.test(record.payload.visitor_handle) && receiptPattern.test(record.payload.consent_receipt)) {
+                return { visitor_handle: record.payload.visitor_handle, consent_receipt: record.payload.consent_receipt };
+            }
+        } catch (error) {
+            // Malformed or unavailable continuity state simply yields no fallback.
+        }
+        return null;
+    }
+
+    function linkDecoratorCouple() {
+        return readHandle() || readContinuityCouple();
+    }
+
+    function linkDecoratorConsentGranted() {
+        if (typeof window.getCkyConsent !== 'function') {
+            return false;
+        }
+        try {
+            return bannerConsent(window.getCkyConsent()) === 'granted';
+        } catch (error) {
+            return false;
+        }
+    }
+
+    // Exact-origin allowlist only, no wildcard matching whatsoever: an entry
+    // must equal url.origin byte for byte.
+    function isDecoratedAppOrigin(origin) {
+        for (var index = 0; index < linkDecoratorAppOrigins.length; index++) {
+            if (linkDecoratorAppOrigins[index] === origin) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // Replaces an existing ul_ch entry in place, or appends a new one; every
+    // other entry of the hash is left untouched, in its original order.
+    function mergeUlChFragment(rawHash, token) {
+        var parts = rawHash === '' ? [] : rawHash.split('&');
+        var replaced = false;
+        for (var index = 0; index < parts.length; index++) {
+            if (parts[index] === '') {
+                continue;
+            }
+            var equalsIndex = parts[index].indexOf('=');
+            var key = equalsIndex === -1 ? parts[index] : parts[index].slice(0, equalsIndex);
+            if (key === 'ul_ch') {
+                parts[index] = 'ul_ch=' + token;
+                replaced = true;
+            }
+        }
+        if (!replaced) {
+            parts.push('ul_ch=' + token);
+        }
+        return parts.filter(function (part) { return part !== ''; }).join('&');
+    }
+
+    function decorateAnchor(anchor) {
+        var href = anchor && anchor.href;
+        if (typeof href !== 'string' || href === '') {
+            return;
+        }
+        var url;
+        try {
+            url = new window.URL(href);
+        } catch (error) {
+            return;
+        }
+        // Exact origin match: no wildcard, no prefix/suffix comparison. This is
+        // the one check the accompanying test suite mutates to prove it runs.
+        if (!isDecoratedAppOrigin(url.origin)) {
+            return;
+        }
+        var couple = linkDecoratorCouple();
+        if (!couple || !linkDecoratorConsentGranted()) {
+            return;
+        }
+        var rawHash = url.hash.length > 0 ? url.hash.slice(1) : '';
+        url.hash = mergeUlChFragment(rawHash, couple.visitor_handle + '.' + couple.consent_receipt);
+        anchor.href = url.href;
+    }
+
+    function handleLinkDecoratorEvent(event) {
+        if (!event || !event.target || typeof event.target.closest !== 'function') {
+            return;
+        }
+        var anchor = event.target.closest('a[href]');
+        if (anchor) {
+            decorateAnchor(anchor);
+        }
+    }
+
+    // Delegation in the capture phase on document, never a DOM-wide rewrite at
+    // load time: this also covers a link injected into the page after this
+    // script ran (a late Elementor render, a client-side navigation, ...).
+    if (linkDecoratorEnabled && linkDecoratorAppOrigins.length > 0 && typeof window.URL === 'function'
+        && typeof document.addEventListener === 'function') {
+        document.addEventListener('click', handleLinkDecoratorEvent, true);
+        document.addEventListener('auxclick', handleLinkDecoratorEvent, true);
+    }
+
     var UTM_KEYS = ['utm_source', 'utm_medium', 'utm_campaign', 'utm_content', 'utm_term'];
     var CLICK_ID_KEYS = ['gclid', 'fbclid', 'gbraid', 'wbraid'];
 

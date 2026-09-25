@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Unlocker acquisition relay
  * Description: Relays one explicitly configured MetForm and produces consented acquisition continuity.
- * Version: 1.2.0
+ * Version: 1.3.0
  *
  * This relay deliberately has no WordPress admin screen.  It is disabled until
  * its complete server-side configuration is present, and never stores form
@@ -343,6 +343,19 @@ if (!class_exists('Unlkr_Acquisition_Relay')) {
                 $landing_key = (string) apply_filters('unlkr_acquisition_touches_landing_key', $landing_key);
             }
 
+            // UNL-4643, amendment 4: link decorator. It is a sub-feature of the
+            // touches producer (same asset, same activation gate), so an invalid
+            // or explicitly disabled decorator configuration never fails the
+            // touches producer itself -- it only leaves the decorator inactive.
+            $link_decorator_enabled_raw = getenv('CRM_ACQUISITION_TOUCHES_LINK_DECORATOR_ENABLED');
+            $link_decorator_enabled = $link_decorator_enabled_raw === false || trim((string) $link_decorator_enabled_raw) === ''
+                ? true
+                : filter_var($link_decorator_enabled_raw, FILTER_VALIDATE_BOOLEAN);
+            $link_decorator_app_origins_raw = trim((string) getenv('CRM_ACQUISITION_TOUCHES_LINK_DECORATOR_APP_ORIGINS'));
+            $link_decorator_app_origins_raw = $link_decorator_app_origins_raw === '' ? 'https://app.unlocker.io' : $link_decorator_app_origins_raw;
+            $link_decorator_app_origins = array_values(array_unique(array_filter(array_map('trim', explode(',', $link_decorator_app_origins_raw)))));
+            $link_decorator_active = $link_decorator_enabled && $this->valid_https_origin_list($link_decorator_app_origins);
+
             return array(
                 'enabled' => $enabled,
                 'valid' => $preferences_url_is_allowed
@@ -361,7 +374,39 @@ if (!class_exists('Unlkr_Acquisition_Relay')) {
                 'ttl_seconds' => $ttl,
                 'timeout_ms' => $timeout,
                 'retries' => $retries,
+                'link_decorator_active' => $link_decorator_active,
+                'link_decorator_app_origins' => $link_decorator_active ? $link_decorator_app_origins : array(),
             );
+        }
+
+        /**
+         * An exact-origin allowlist has no wildcard semantics anywhere in this
+         * plugin: every entry must be a canonical HTTPS origin with no path,
+         * query, fragment or credentials. Used by the link decorator's app
+         * origin list (UNL-4643); mirrors the shape already enforced for
+         * CRM_ACQUISITION_CONTINUITY_APP_ORIGINS.
+         *
+         * @param array<int, string> $origins
+         */
+        private function valid_https_origin_list($origins)
+        {
+            if (!is_array($origins) || count($origins) === 0) {
+                return false;
+            }
+            foreach ($origins as $origin) {
+                $parts = parse_url($origin);
+                $canonical = is_array($parts)
+                    && isset($parts['scheme'], $parts['host'])
+                    && strtolower((string) $parts['scheme']) === 'https'
+                    && !isset($parts['path']) && !isset($parts['query']) && !isset($parts['fragment'])
+                    && !isset($parts['user']) && !isset($parts['pass'])
+                    && (!isset($parts['port']) || (int) $parts['port'] > 0);
+                if (!$canonical) {
+                    return false;
+                }
+            }
+
+            return true;
         }
 
         /** External same-origin asset; it is independent of continuity and the MetForm relay. */
@@ -372,7 +417,7 @@ if (!class_exists('Unlkr_Acquisition_Relay')) {
                 return;
             }
 
-            wp_enqueue_script('unlkr-acquisition-touches', plugin_dir_url(__FILE__) . 'unlkr-acquisition-touches.js', array(), '1.0.0', true);
+            wp_enqueue_script('unlkr-acquisition-touches', plugin_dir_url(__FILE__) . 'unlkr-acquisition-touches.js', array(), '1.1.0', true);
         }
 
         /** Emits no bearer, identity, URL, cookie value or personal data. */
@@ -390,7 +435,9 @@ if (!class_exists('Unlkr_Acquisition_Relay')) {
                 . '" data-landing-key="' . $escape($config['landing_key'])
                 . '" data-ttl-seconds="' . $escape((string) $config['ttl_seconds'])
                 . '" data-timeout-ms="' . $escape((string) $config['timeout_ms'])
-                . '" data-retries="' . $escape((string) $config['retries']) . '">';
+                . '" data-retries="' . $escape((string) $config['retries'])
+                . '" data-link-decorator-enabled="' . $escape($config['link_decorator_active'] ? '1' : '0')
+                . '" data-link-decorator-app-origins="' . $escape(implode(',', $config['link_decorator_app_origins'])) . '">';
         }
 
         /** @return int|null */
