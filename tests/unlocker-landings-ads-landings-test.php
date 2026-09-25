@@ -66,6 +66,7 @@ use function Unlocker\Landings\ads_landing_rewrite_full_content;
 use function Unlocker\Landings\ads_landing_output_buffer_callback_for_current_request;
 use function Unlocker\Landings\filter_ad_landing_widget_content;
 use function Unlocker\Landings\enqueue_ad_landing_query_script;
+use function Unlocker\Landings\ad_landing_cta_overlap_fix_css;
 use const Unlocker\Landings\AD_LANDING_CTA_MARKER;
 use const Unlocker\Landings\AD_LANDING_PAGES;
 
@@ -546,6 +547,73 @@ enqueue_ad_landing_query_script();
 check(
     'on an unrelated page, the query-propagation script is NOT enqueued',
     !isset($GLOBALS['test_enqueued_scripts']['unlocker-ads-landing-query'])
+);
+
+// -- CTA/hero-image overlap fix: ad_landing_cta_overlap_fix_css() -----------
+// Pure function: the exact <style> block print_ad_landing_cta_overlap_fix()
+// echoes in <head>. Page-scoped by the `page-id-{id}` class WordPress always
+// prints on <body>, so it can never leak to another page, and targets the
+// whole widget wrapper (`.elementor-element-{id}`), not just an <img> class,
+// because the real overlap on page 12723 is caused by the image widget's OWN
+// `.elementor-widget-container` (margin-top:-60px in the real Elementor
+// per-post CSS), not merely by the <img> tag nested inside it -- pointer-events:none
+// on only the <img> leaves that container div still catching the click
+// (verified with a real browser against a copy of the actual prod markup,
+// see the recette notes in the PR description).
+
+check(
+    'ad_landing_cta_overlap_fix_css(): exact <style> block for page 12723 / widget 745598c0',
+    ad_landing_cta_overlap_fix_css(12723, '745598c0') === "<style>.page-id-12723 .elementor-element-745598c0{pointer-events:none}</style>\n"
+);
+
+// -- CTA/hero-image overlap fix: print_ad_landing_cta_overlap_fix() ---------
+// Integration via the real `wp_head` action this file registers the callback
+// on (do_action('wp_head') runs everything add_action('wp_head', ...) added,
+// exactly like a real WordPress request would).
+
+function captureWpHeadOutput(): string
+{
+    ob_start();
+    do_action('wp_head');
+
+    return ob_get_clean();
+}
+
+$GLOBALS['test_current_page_id'] = 12723;
+$wpHeadOutput12723 = captureWpHeadOutput();
+check(
+    'wp_head on page 12723: prints the overlap-fix <style> block, scoped to this page and this widget',
+    strpos($wpHeadOutput12723, '.page-id-12723 .elementor-element-745598c0{pointer-events:none}') !== false
+);
+
+// -- Mutation-proof case: page-scoping of the overlap fix --------------------
+// This is the test that must go RED if the `cta_overlap_widget` lookup keyed
+// on the CURRENT page id were replaced by a hardcoded '745598c0' (or the
+// page-id guard were dropped): a page id that resolves to a DIFFERENT
+// AD_LANDING_PAGES entry (11814 and 12231, whose `cta_overlap_widget` is
+// null -- they never had this bug) must never print any overlap-fix
+// <style> block, and an entirely unrelated page id (999, not in
+// AD_LANDING_PAGES at all) must not either.
+
+$GLOBALS['test_current_page_id'] = 11814;
+$wpHeadOutput11814 = captureWpHeadOutput();
+check(
+    'wp_head on page 11814 (no overlap bug there): no overlap-fix <style> block printed',
+    strpos($wpHeadOutput11814, 'pointer-events:none') === false
+);
+
+$GLOBALS['test_current_page_id'] = 12231;
+$wpHeadOutput12231 = captureWpHeadOutput();
+check(
+    'wp_head on page 12231 (no overlap bug there): no overlap-fix <style> block printed',
+    strpos($wpHeadOutput12231, 'pointer-events:none') === false
+);
+
+$GLOBALS['test_current_page_id'] = 999;
+$wpHeadOutputUnrelated = captureWpHeadOutput();
+check(
+    'wp_head on an unrelated page: no overlap-fix <style> block printed',
+    strpos($wpHeadOutputUnrelated, 'pointer-events:none') === false
 );
 
 // --------------------------------------------------------------------------
