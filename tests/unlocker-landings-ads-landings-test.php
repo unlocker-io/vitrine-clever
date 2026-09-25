@@ -67,8 +67,20 @@ use function Unlocker\Landings\ads_landing_output_buffer_callback_for_current_re
 use function Unlocker\Landings\filter_ad_landing_widget_content;
 use function Unlocker\Landings\enqueue_ad_landing_query_script;
 use function Unlocker\Landings\ad_landing_cta_overlap_fix_css;
+use function Unlocker\Landings\from_slug_whitelist;
+use function Unlocker\Landings\offer_fallback_urls;
+use function Unlocker\Landings\split_url;
+use function Unlocker\Landings\delegation_url;
+use function Unlocker\Landings\ad_delegation_url;
+use function Unlocker\Landings\ad_carte_g_t_url;
+use function Unlocker\Landings\ad_carte_t_url;
 use const Unlocker\Landings\AD_LANDING_CTA_MARKER;
 use const Unlocker\Landings\AD_LANDING_PAGES;
+use const Unlocker\Landings\SLUG_SPLIT;
+use const Unlocker\Landings\SLUG_DELEGATION;
+use const Unlocker\Landings\SLUG_AD_DELEGATION;
+use const Unlocker\Landings\SLUG_AD_CARTE_G_T;
+use const Unlocker\Landings\SLUG_AD_CARTE_T;
 
 $assertions = 0;
 $failures = 0;
@@ -100,6 +112,63 @@ class TestAdLandingWidget
     }
 }
 
+// -- Ads landing slugs & the from/offer whitelist maps -----------------------
+
+check(
+    'page 11814: AD_LANDING_PAGES slug matches SLUG_AD_DELEGATION',
+    AD_LANDING_PAGES[11814]['slug'] === SLUG_AD_DELEGATION
+);
+check(
+    'page 12231: AD_LANDING_PAGES slug matches SLUG_AD_CARTE_G_T',
+    AD_LANDING_PAGES[12231]['slug'] === SLUG_AD_CARTE_G_T
+);
+check(
+    'page 12723: AD_LANDING_PAGES slug matches SLUG_AD_CARTE_T',
+    AD_LANDING_PAGES[12723]['slug'] === SLUG_AD_CARTE_T
+);
+
+$fromSlugWhitelist = from_slug_whitelist();
+check('from_slug_whitelist(): exactly 5 entries', count($fromSlugWhitelist) === 5);
+check(
+    'from_slug_whitelist(): split slug maps to split_url()',
+    ($fromSlugWhitelist[SLUG_SPLIT] ?? null) === split_url()
+);
+check(
+    'from_slug_whitelist(): delegation slug maps to delegation_url()',
+    ($fromSlugWhitelist[SLUG_DELEGATION] ?? null) === delegation_url()
+);
+check(
+    'from_slug_whitelist(): ad delegation slug maps to ad_delegation_url()',
+    ($fromSlugWhitelist[SLUG_AD_DELEGATION] ?? null) === ad_delegation_url()
+);
+check(
+    'from_slug_whitelist(): ad carte-g-t slug maps to ad_carte_g_t_url()',
+    ($fromSlugWhitelist[SLUG_AD_CARTE_G_T] ?? null) === ad_carte_g_t_url()
+);
+check(
+    'from_slug_whitelist(): ad carte-t slug maps to ad_carte_t_url()',
+    ($fromSlugWhitelist[SLUG_AD_CARTE_T] ?? null) === ad_carte_t_url()
+);
+
+$offerFallbackUrls = offer_fallback_urls();
+check('offer_fallback_urls(): exactly 4 entries', count($offerFallbackUrls) === 4);
+check(
+    'offer_fallback_urls(): delegation maps to delegation_url()',
+    ($offerFallbackUrls['delegation'] ?? null) === delegation_url()
+);
+check(
+    'offer_fallback_urls(): split maps to split_url()',
+    ($offerFallbackUrls['split'] ?? null) === split_url()
+);
+check(
+    'offer_fallback_urls(): carte-g-t maps to ad_carte_g_t_url()',
+    ($offerFallbackUrls['carte-g-t'] ?? null) === ad_carte_g_t_url()
+);
+check(
+    'offer_fallback_urls(): carte-t maps to ad_carte_t_url()',
+    ($offerFallbackUrls['carte-t'] ?? null) === ad_carte_t_url()
+);
+
 // -- ads_landing_rewrite_button_href(): real fixtures ------------------------
 // Verbatim fragments from the cartography (curl'd real production HTML).
 
@@ -123,8 +192,8 @@ $page12723Cta7038b1ec = <<<'HTML'
 </div>
 HTML;
 
-$newHrefDelegation = 'https://unlocker.io/demarrer/?offre=delegation&parcours=demo';
-$newHrefCarteT = 'https://unlocker.io/demarrer/?offre=carte-t&parcours=demo';
+$newHrefDelegation = 'https://unlocker.io/demarrer/?offre=delegation&parcours=demo&from=delegation-carte-g-conciergerie';
+$newHrefCarteT = 'https://unlocker.io/demarrer/?offre=carte-t&parcours=demo&from=carte-t';
 
 $rewritten13932f9c = ads_landing_rewrite_button_href($page11814Cta13932f9c, $newHrefDelegation, '13932f9c');
 check(
@@ -255,6 +324,28 @@ $arbitraryResult = apply_filters('elementor/widget/render_content', $arbitraryWi
 check(
     'page 12723: some other arbitrary widget id is unchanged (no calendar widget on this page)',
     $arbitraryResult === $arbitraryWidgetHtml
+);
+
+// -- Page 12231's own CTA href (previously untested for itself) -------------
+
+$GLOBALS['test_current_page_id'] = 12231;
+
+$page12231Cta02ab38a = <<<'HTML'
+<div class="elementor-button-wrapper">
+    <a class="elementor-button elementor-button-link elementor-size-sm" href="https://app.unlocker.io/register" target="_blank">
+        <span class="elementor-button-content-wrapper">
+            <span class="elementor-button-text">Accéder à l'offre Carte G+T</span>
+        </span>
+    </a>
+</div>
+HTML;
+
+$newHrefCarteGT = 'https://unlocker.io/demarrer/?offre=carte-g-t&parcours=demo&from=offre-carte-g-t';
+
+$carteGTResult = apply_filters('elementor/widget/render_content', $page12231Cta02ab38a, new TestAdLandingWidget('02ab38a'));
+check(
+    'page 12231, widget 02ab38a (a CTA): rewritten to .../demarrer/?offre=carte-g-t&parcours=demo&from=offre-carte-g-t',
+    strpos($carteGTResult, 'href="' . htmlspecialchars($newHrefCarteGT, ENT_QUOTES) . '"') !== false
 );
 
 // -- Mutation-proof case: page-id restriction --------------------------------

@@ -50,18 +50,21 @@ namespace Unlocker\Landings;
 const AD_LANDING_PAGES = [
     11814 => [
         'offer' => 'delegation',
+        'slug' => SLUG_AD_DELEGATION,
         'ctas' => ['13932f9c', '5901f037', '4ac9dc0b'],
         'calendar_widget' => '10ffe685',
         'cta_overlap_widget' => null,
     ],
     12231 => [
         'offer' => 'carte-g-t',
+        'slug' => SLUG_AD_CARTE_G_T,
         'ctas' => ['02ab38a', 'fadda98', '2c7f661'],
         'calendar_widget' => '5f0ad3d',
         'cta_overlap_widget' => null,
     ],
     12723 => [
         'offer' => 'carte-t',
+        'slug' => SLUG_AD_CARTE_T,
         'ctas' => ['7038b1ec'],
         'calendar_widget' => null,
         // Measured in prod (25/09): the hero mockup image widget's own
@@ -172,7 +175,7 @@ function filter_ad_landing_widget_content(string $content, $widget): string
 
     $config = AD_LANDING_PAGES[$pageId];
     $widgetId = $widget->get_id();
-    $targetUrl = demarrer_url('offre=' . rawurlencode($config['offer']) . '&parcours=demo');
+    $targetUrl = demarrer_url('offre=' . rawurlencode($config['offer']) . '&parcours=demo&from=' . rawurlencode($config['slug']));
 
     if (in_array($widgetId, $config['ctas'], true)) {
         return ads_landing_rewrite_button_href($content, $targetUrl, $widgetId);
@@ -262,7 +265,7 @@ function ads_landing_locate_widget_inner_html(string $html, string $widgetId): ?
  */
 function ads_landing_rewrite_full_content(string $html, array $config): string
 {
-    $targetUrl = demarrer_url('offre=' . rawurlencode($config['offer']) . '&parcours=demo');
+    $targetUrl = demarrer_url('offre=' . rawurlencode($config['offer']) . '&parcours=demo&from=' . rawurlencode($config['slug']));
 
     foreach ($config['ctas'] as $widgetId) {
         $location = ads_landing_locate_widget_inner_html($html, $widgetId);

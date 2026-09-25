@@ -1031,7 +1031,7 @@ function cli_crm_retry(array $args, array $assocArgs): void
     }
 }
 
-// -- Front-end wiring: expose the endpoint & the two landing URLs to flow.js
+// -- Front-end wiring: expose the endpoint & the "Retour à l'offre" URL maps to flow.js
 
 add_action('wp_enqueue_scripts', __NAMESPACE__ . '\\inject_lead_form_config', 20);
 
@@ -1043,8 +1043,14 @@ function inject_lead_form_config(): void
 
     $config = [
         'endpoint' => rest_url('unlocker-landings/v1/lead'),
-        'split' => split_url(),
-        'delegation' => delegation_url(),
+        // Slug => absolute URL, both for validating an explicit `from` query
+        // param and for matching document.referrer's path -- see
+        // resolveBackHref() in flow.js. Never a free-form URL: this is what
+        // stands between a `from` param and an open redirect.
+        'fromSlugs' => from_slug_whitelist(),
+        // offer => absolute URL, the last-resort fallback when neither of
+        // the above resolved anything.
+        'offerFallback' => offer_fallback_urls(),
         // Lets flow.js look up the C2c touches producer's own visitor
         // handle in sessionStorage (same site key, same storage key shape).
         // Empty when unset -- flow.js then never attempts the lookup.
